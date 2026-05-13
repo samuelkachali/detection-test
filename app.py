@@ -41,39 +41,46 @@ if uploaded_file is not None:
     with st.spinner('Analyzing...'):
         preds = model.predict(img_array)
         
-        c_idx = np.argmax(preds[0])
-        d_idx = np.argmax(preds[1])
-        
-        c_conf = np.max(preds[0])
-        d_conf = np.max(preds[1])
-
+        # 1. Determine the Crop First
+        c_probs = preds[0][0]
+        c_idx = np.argmax(c_probs)
+        c_conf = c_probs[c_idx]
         predicted_crop = CROP_NAMES[c_idx]
+
+        # 2. APPLY MASKING TO DISEASE PROBABILITIES
+        d_probs = preds[1][0].copy() # Work on a copy of the disease probabilities
+        
+        crop_keywords = {
+            'soya': 'soybean',
+            'bean': 'bean',
+            'maize': 'maize'
+        }
+        target_keyword = crop_keywords[predicted_crop]
+
+        # Zero out any disease that doesn't belong to the detected crop
+        for i, disease_name in enumerate(DISEASE_NAMES):
+            if target_keyword not in disease_name.lower():
+                d_probs[i] = 0.0  # Masking: Setting the probability to zero
+
+        # 3. Pick the best disease from the REMAINING valid options
+        d_idx = np.argmax(d_probs)
+        d_conf = d_probs[d_idx]
         predicted_disease = DISEASE_NAMES[d_idx]
 
-    # --- REVISED VALIDATION LOGIC ---
+    # --- VALIDATION LOGIC ---
     is_valid = True
     error_message = ""
 
-    # 1. Lowered Threshold (70% is safer for a baseline model)
+    # Confidence check
     if c_conf < 0.70:
         is_valid = False
         error_message = f"Low confidence ({c_conf:.1%}). Please provide a clearer leaf photo."
-
-    # 2. Flexible Semantic Check
-    # This checks if the first word of the disease matches the crop
-    crop_val = predicted_crop.lower() # 'bean', 'maize', or 'soya'
-    disease_val = predicted_disease.lower() # e.g., 'soybeans healthy'
-
-    # Mapping common variations
-    if crop_val == 'soya' and 'soybean' in disease_val:
-        pass # This is a match
-    elif crop_val == 'bean' and 'bean' in disease_val:
-        pass # This is a match
-    elif crop_val == 'maize' and 'maize' in disease_val:
-        pass # This is a match
-    else:
+    
+    # Safety Check: If after masking, the highest disease probability is 0, 
+    # it means the model is completely confused.
+    if d_conf == 0:
         is_valid = False
-        error_message = f"Mismatch: Predicted {crop_val} but symptoms look like {predicted_disease}."
+        error_message = "The model could not find a matching disease for this crop type."
 
     # --- DISPLAY ---
     if not is_valid:
