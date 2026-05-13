@@ -94,8 +94,8 @@ if uploaded_file is not None:
         st.metric("Unified Prediction", v2_display)
         st.caption(f"Confidence: {v2_conf:.1%}")
         
-        st.write("✅ Logical consistency guaranteed by architecture.")
+        st.write("Logical consistency guaranteed by architecture.")
 
     # Educational Insight for supervisor
     if v1_crop == "soya" and "soya" not in v2_full_label.lower():
-        st.success("🎯 **Improvement Note:** The new model correctly avoided the Soya-bias seen in V1.")
+        st.success("**Improvement Note:** The new model correctly avoided the Soya-bias seen in V1.")
