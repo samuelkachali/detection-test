@@ -1,32 +1,507 @@
 import streamlit as st
 import tensorflow as tf
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
 import json
+from transformers import CLIPProcessor, CLIPModel
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Model Comparison - Crop AI", page_icon="🌱", layout="wide")
+st.set_page_config(page_title="Model Comparison Pipeline - Crop AI", page_icon="🌱", layout="wide")
 
-# --- LOAD ASSETS ---
+# =====================================================================
+# --- CUSTOM CNN MODEL DEFINITION (Matches saved PyTorch weights) ---
+# =====================================================================
+class CNN_NeuralNet(nn.Module):
+    def __init__(self, in_channels, num_classes):
+        super().__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2)
+        )
+
+        self.res1 = nn.Sequential(
+            nn.Sequential(
+                nn.Conv2d(128, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(128, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True)
+            )
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2)
+        )
+        
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2)
+        )
+
+        self.res2 = nn.Sequential(
+            nn.Sequential(
+                nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                nn.BatchNorm2d(512),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                nn.BatchNorm2d(512),
+                nn.ReLU(inplace=True)
+            )
+        )
+
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, xb):
+        out = self.conv1(xb)
+        out = self.conv2(out)
+        out = self.res1(out) + out
+        out = self.conv3(out)
+        out = self.conv4(out)
+        out = self.res2(out) + out
+        out = self.classifier(out)
+        return out
+
+
+# =====================================================================
+# --- CLIP ENSEMBLE PROMPT MAP ---
+# =====================================================================
+CLIP_ENSEMBLE_MAP = {
+    'Tomato___Late_blight': [
+        "a tomato leaf with dark water-soaked spots from late blight disease",
+        "late blight fungal infection destroying a tomato plant leaf",
+        "a decaying tomato leaf affected by phytophthora late blight"
+    ],
+    'Tomato___healthy': [
+        "a clean healthy green tomato leaf",
+        "a pristine green tomato leaf without any disease or blemishes",
+        "healthy tomato foliage"
+    ],
+    'Grape___healthy': [
+        "a clean healthy green grape leaf",
+        "healthy vibrant grape vine foliage",
+        "a pristine grape leaf without any fungal spots"
+    ],
+    'Orange___Haunglongbing_(Citrus_greening)': [
+        "a citrus orange leaf showing yellow mottling from huanglongbing or greening disease",
+        "citrus greening disease causing asymmetric yellowing on an orange leaf",
+        "an orange tree leaf infected with HLB citrus greening"
+    ],
+    'Soybean___healthy': [
+        "a clean healthy green soybean leaf with zero spots",
+        "pristine green soy plant foliage",
+        "a perfectly healthy soybean leaf surface"
+    ],
+    'Squash___Powdery_mildew': [
+        "a squash leaf covered in white powdery mildew fungus",
+        "powdery mildew creating white dusty patches on a squash leaf",
+        "a pumpkin or squash leaf showing white fungal spots"
+    ],
+    'Potato___healthy': [
+        "a healthy green potato plant leaf",
+        "pristine potato leaf foliage",
+        "a clean potato leaf free of blight spots"
+    ],
+    'Corn_(maize)___Northern_Leaf_Blight': [
+        "a corn leaf with long cigar-shaped northern leaf blight lesions",
+        "maize foliage showing elongated grayish-brown northern leaf blight stripes",
+        "northern corn leaf blight fungal damage on a maize leaf"
+    ],
+    'Tomato___Early_blight': [
+        "a tomato leaf with dark concentric rings from early blight disease",
+        "early blight target-like brown spots on a tomato leaf",
+        "alternaria early blight infection yellowing a tomato leaf"
+    ],
+    'Tomato___Septoria_leaf_spot': [
+        "a tomato leaf with numerous tiny circular spots showing gray centers",
+        "septoria leaf spot fungal infection covering a tomato leaf",
+        "small dark concentric flecks of septoria on tomato foliage"
+    ],
+    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot': [
+        "a corn leaf with rectangular gray leaf spot lesions running parallel to veins",
+        "maize leaf infected with cercospora gray leaf spot disease",
+        "grayish rectangular blocky spots on a corn leaf"
+    ],
+    'Strawberry___Leaf_scorch': [
+        "a strawberry leaf with purplish-brown blotches from leaf scorch",
+        "leaf scorch disease drying out a strawberry leaf",
+        "purplish lesions spreading across a strawberry leaf surface"
+    ],
+    'Peach___healthy': [
+        "a clean healthy elongated peach tree leaf",
+        "healthy pristine peach leaf foliage",
+        "a peach leaf free of bacterial spots"
+    ],
+    'Apple___Apple_scab': [
+        "an apple leaf with velvety olive-green to brown scab spots",
+        "apple scab fungal lesions roughing up an apple leaf",
+        "venturia inaequalis scab infection on an apple tree leaf"
+    ],
+    'Tomato___Tomato_Yellow_Leaf_Curl_Virus': [
+        "a tomato leaf showing severe curling wrinkling and yellow margins",
+        "tomato yellow leaf curl virus causing stunted deformed leaves",
+        "curled upward deformed yellowing tomato foliage from virus"
+    ],
+    'Tomato___Bacterial_spot': [
+        "a tomato leaf covered in small greasy water-soaked bacterial spots",
+        "bacterial spot disease creating dark lesions with yellow halos on a tomato leaf",
+        "xanthomonas bacterial spot damage on tomato foliage"
+    ],
+    'Apple___Black_rot': [
+        "an apple leaf showing frog-eye circular brown spots from black rot",
+        "black rot fungal infection causing concentric rings on an apple leaf",
+        "frog-eye leaf spot black rot on apple foliage"
+    ],
+    'Blueberry___healthy': [
+        "a healthy smooth blueberry plant leaf",
+        "clean green blueberry foliage",
+        "pristine blueberry leaf without spots"
+    ],
+    'Cherry_(including_sour)___Powdery_mildew': [
+        "a cherry tree leaf with white powdery mildew coating",
+        "powdery mildew fungus distorting a cherry leaf",
+        "dusty white fungal patches on cherry foliage"
+    ],
+    'Peach___Bacterial_spot': [
+        "a peach tree leaf with small dark spots that leave shot-holes",
+        "bacterial spot causing deep dark lesions on an elongated peach leaf",
+        "peach foliage infected with xanthomonas bacterial spot"
+    ],
+    'Apple___Cedar_apple_rust': [
+        "an apple leaf with bright orange-yellow circular rust spots",
+        "cedar apple rust disease producing striking orange spots on an apple leaf",
+        "bright yellow-orange fungal lesions on apple foliage"
+    ],
+    'Tomato___Target_Spot': [
+        "a tomato leaf showing small dark brown spots with subtle target rings",
+        "target spot corynespora disease on a tomato plant leaf",
+        "brown circular spots with faint concentric circles on tomato foliage"
+    ],
+    'Pepper,_bell___healthy': [
+        "a healthy shiny green bell pepper leaf",
+        "clean pristine capsicum bell pepper foliage",
+        "a healthy green pepper plant leaf"
+    ],
+    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)': [
+        "a grape leaf with large dark brown dead patches from leaf blight",
+        "isariopsis leaf blight fungal damage dry spots on a grape leaf",
+        "large expanding brown lesions on grape vine foliage"
+    ],
+    'Potato___Late_blight': [
+        "a potato leaf with dark water-soaked spots from late blight disease",
+        "late blight phytophthora infection blackening a potato leaf",
+        "decaying dying potato foliage from late blight attack"
+    ],
+    'Tomato___Tomato_mosaic_virus': [
+        "a tomato leaf showing dark and light green mottled mosaic patterns",
+        "tomato mosaic virus causing blistered mottled green patterns on a leaf",
+        "mottled green and yellow mosaic virus markings on tomato foliage"
+    ],
+    'Strawberry___healthy': [
+        "a healthy green three-lobed strawberry leaf",
+        "clean green strawberry plant foliage",
+        "pristine strawberry leaf surface without scorch"
+    ],
+    'Apple___healthy': [
+        "a clean healthy green apple tree leaf",
+        "pristine green apple leaf foliage",
+        "healthy orchard apple tree leaf"
+    ],
+    'Grape___Black_rot': [
+        "a grape leaf with small reddish-brown circular spots with dark borders",
+        "black rot fungal lesions attacking a grape vine leaf",
+        "small brown necrotic spots on a grape leaf surface"
+    ],
+    'Potato___Early_blight': [
+        "a potato leaf with target-board dark brown concentric circles",
+        "early blight alternaria spots on a lower potato plant leaf",
+        "brown circular target-like lesions on potato foliage"
+    ],
+    'Cherry_(including_sour)___healthy': [
+        "a clean healthy green cherry tree leaf",
+        "pristine cherry plant foliage",
+        "healthy sour cherry tree leaf surface"
+    ],
+    'Corn_(maize)___Common_rust_': [
+        "a corn leaf covered in powdery golden-brown cinnamon rust blisters",
+        "maize leaf showing raised reddish-brown common rust pustules",
+        "corn rust spores dusting a maize crop leaf"
+    ],
+    'Grape___Esca_(Black_Measles)': [
+        "a grape leaf showing tiger-stripe yellow and brown drying patterns",
+        "esca black measles disease causing dramatic leaf tissue necrosis on grape foliage",
+        "tiger-striped drying wilting grape vine leaf"
+    ],
+    'Raspberry___healthy': [
+        "a healthy green textured raspberry leaf",
+        "clean pristine raspberry plant foliage",
+        "healthy raspberry leaf surface free of disease"
+    ],
+    'Tomato___Leaf_Mold': [
+        "a tomato leaf with pale green or yellow spots showing olive-green mold underneath",
+        "tomato leaf mold fungal coating fading a leaf surface",
+        "velvety mold growth causing pale patches on tomato foliage"
+    ],
+    'Tomato___Spider_mites Two-spotted_spider_mite': [
+        "a tomato leaf showing tiny yellow stippling speckles and fine webbing",
+        "two-spotted spider mite damage bleaching or speckling a tomato leaf",
+        "stippled yellow dried out tomato leaf from spider mite feeding"
+    ],
+    'Pepper,_bell___Bacterial_spot': [
+        "a bell pepper leaf with small irregular dark spots or cracks",
+        "bacterial spot causing yellow-green pimple-like spots on a pepper leaf",
+        "capsicum bell pepper foliage showing xanthomonas bacterial spot"
+    ],
+    'Corn_(maize)___healthy': [
+        "a clean healthy green corn leaf",
+        "pristine long green maize plant leaf",
+        "healthy corn foliage without any stripes or rust blisters"
+    ],
+    'maize_common_rust': [
+        "a corn leaf covered in powdery golden-brown cinnamon rust blisters",
+        "maize leaf showing raised reddish-brown common rust pustules",
+        "corn rust spores dusting a maize crop leaf"
+    ],
+    'maize_healthy': [
+        "a clean healthy green corn leaf",
+        "pristine long green maize plant leaf",
+        "healthy corn foliage without any stripes or rust blisters"
+    ],
+    'maize_blight': [
+        "a corn leaf with long cigar-shaped northern leaf blight lesions",
+        "maize foliage showing elongated grayish-brown northern leaf blight stripes",
+        "northern corn leaf blight fungal damage on a maize leaf"
+    ],
+    'maize_gray_leaf_spot': [
+        "a corn leaf with rectangular gray leaf spot lesions running parallel to veins",
+        "maize leaf infected with cercospora gray leaf spot disease",
+        "grayish rectangular blocky spots on a corn leaf"
+    ],
+    'beans_rust': [
+        "a bean leaf covered in raised reddish-brown rust spore pustules",
+        "phaseolus vulgaris bean leaf with powdery golden rust blisters",
+        "rust fungal breakout spotting a green bean leaf"
+    ],
+    'beans_angular_leaf_spot': [
+        "a bean leaf with angular leaf spot geometric lesions",
+        "angular leaf spot causing dark brown square lesions on a bean leaf",
+        "phaseolus vulgaris bean leaf infected with angular leaf spot"
+    ],
+    'beans_healthy': [
+        "a healthy green bean crop leaf",
+        "clean pristine common bean plant foliage",
+        "a healthy green bean leaf without spots or mold"
+    ],
+    'soyabeans_rust': [
+        "a soybean leaf with small red-brown volcanic rust pustules on the underside",
+        "asian soybean rust disease destroying a soy plant leaf",
+        "brown powdery rust blisters covering a yellowing soybean leaf"
+    ],
+    'soyabeans_healthy': [
+        "a clean healthy green soybean leaf with zero spots",
+        "pristine green soy plant foliage",
+        "a perfectly healthy soybean leaf surface"
+    ],
+    'soyabeans_suddendeathsyndrome': [
+        "a soybean leaf showing severe yellow blotches between veins with a green midrib",
+        "sudden death syndrome causing bright interveinal necrosis on a soybean leaf",
+        "soybean leaf dying off with bright yellow-brown stripes between green veins"
+    ],
+    'soyabeans_frogeyeleafspot': [
+        "a soybean leaf with small circular gray spots ringed by dark reddish-brown borders",
+        "frog-eye leaf spot fungal lesions on a soybean plant leaf",
+        "circular tan to gray spots resembling a frog eye on soy foliage"
+    ],
+    'soyabeans_yellow_mosaic': [
+        "a soybean leaf with bright yellow patches and green mosaic mottling",
+        "soybean yellow mosaic virus bright yellowing spreading on a leaf",
+        "mottled bright yellow and green distorted soybean plant foliage"
+    ],
+    'soyabeans_targetleafspot': [
+        "a soybean leaf with large brown circular lesions showing prominent concentric rings",
+        "target leaf spot corynespora disease on a soybean leaf",
+        "expanding dark brown circular spots resembling a target on a soy leaf"
+    ],
+    'soyabeans_bacterialpustule': [
+        "a soybean leaf with small light green spots showing raised bumpy centers",
+        "bacterial pustule infection creating tiny elevated bumps on a soybean leaf",
+        "soybean foliage displaying yellow specks with elevated volcanic centers"
+    ],
+    'unknown_or_other': [
+        "a random object that is not a plant leaf",
+        "a picture of a person, face, room, or everyday object",
+        "human clothing, electronics, buildings, or text graphics",
+        "blurry background noise or scenery with no crops present"
+    ]
+}
+
+# --- CLEAN DISPLAY NAMES FOR THE UI ---
+DISPLAY_NAME_MAP = {
+    # PyTorch PlantDoc / General Classes
+    'Tomato___Late_blight': 'Tomato - Late Blight',
+    'Tomato___healthy': 'Tomato - Healthy',
+    'Grape___healthy': 'Grape - Healthy',
+    'Orange___Haunglongbing_(Citrus_greening)': 'Citrus - Citrus Greening (HLB)',
+    'Soybean___healthy': 'Soybean - Healthy',
+    'Squash___Powdery_mildew': 'Squash - Powdery Mildew',
+    'Potato___healthy': 'Potato - Healthy',
+    'Corn_(maize)___Northern_Leaf_Blight': 'Maize - Northern Leaf Blight',
+    'Tomato___Early_blight': 'Tomato - Early Blight',
+    'Tomato___Septoria_leaf_spot': 'Tomato - Septoria Leaf Spot',
+    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot': 'Maize - Gray Leaf Spot',
+    'Strawberry___Leaf_scorch': 'Strawberry - Leaf Scorch',
+    'Peach___healthy': 'Peach - Healthy',
+    'Apple___Apple_scab': 'Apple - Apple Scab',
+    'Tomato___Tomato_Yellow_Leaf_Curl_Virus': 'Tomato - Yellow Leaf Curl Virus',
+    'Tomato___Bacterial_spot': 'Tomato - Bacterial Spot',
+    'Apple___Black_rot': 'Apple - Black Rot',
+    'Blueberry___healthy': 'Blueberry - Healthy',
+    'Cherry_(including_sour)___Powdery_mildew': 'Cherry - Powdery Mildew',
+    'Peach___Bacterial_spot': 'Peach - Bacterial Spot',
+    'Apple___Cedar_apple_rust': 'Apple - Cedar Apple Rust',
+    'Tomato___Target_Spot': 'Tomato - Target Spot',
+    'Pepper,_bell___healthy': 'Bell Pepper - Healthy',
+    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)': 'Grape - Leaf Blight',
+    'Potato___Late_blight': 'Potato - Late Blight',
+    'Tomato___Tomato_mosaic_virus': 'Tomato - Mosaic Virus',
+    'Strawberry___healthy': 'Strawberry - Healthy',
+    'Apple___healthy': 'Apple - Healthy',
+    'Grape___Black_rot': 'Grape - Black Rot',
+    'Potato___Early_blight': 'Potato - Early Blight',
+    'Cherry_(including_sour)___healthy': 'Cherry - Healthy',
+    'Corn_(maize)___Common_rust_': 'Maize - Common Rust',
+    'Grape___Esca_(Black_Measles)': 'Grape - Esca (Black Measles)',
+    'Raspberry___healthy': 'Raspberry - Healthy',
+    'Tomato___Leaf_Mold': 'Tomato - Leaf Mold',
+    'Tomato___Spider_mites Two-spotted_spider_mite': 'Tomato - Spider Mites',
+    'Pepper,_bell___Bacterial_spot': 'Bell Pepper - Bacterial Spot',
+    'Corn_(maize)___healthy': 'Maize - Healthy',
+
+    # Local V1 & V2 Regional Crop Classes
+    'unknown_or_other': 'Unknown / Not a Plant Leaf',
+    'maize_common_rust': 'Maize - Common Rust',
+    'maize_healthy': 'Maize - Healthy',
+    'maize_blight': 'Maize - Leaf Blight',
+    'maize_gray_leaf_spot': 'Maize - Gray Leaf Spot',
+    'beans_rust': 'Beans - Rust',
+    'beans_angular_leaf_spot': 'Beans - Angular Leaf Spot',
+    'beans_healthy': 'Beans - Healthy',
+    'soyabeans_rust': 'Soybeans - Rust',
+    'soyabeans_healthy': 'Soybeans - Healthy',
+    'soyabeans_suddendeathsyndrome': 'Soybeans - Sudden Death Syndrome',
+    'soyabeans_frogeyeleafspot': 'Soybeans - Frogeye Leaf Spot',
+    'soyabeans_yellow_mosaic': 'Soybeans - Yellow Mosaic',
+    'soyabeans_targetleafspot': 'Soybeans - Target Leaf Spot',
+    'soyabeans_bacterialpustule': 'Soybeans - Bacterial Pustule'
+}
+
+def format_disease_name(raw_name):
+    """Fallback function that formats the name if it's missing from the map"""
+    if raw_name in DISPLAY_NAME_MAP:
+        return DISPLAY_NAME_MAP[raw_name]
+    
+    # Smart fallback cleaning logic just in case
+    cleaned = raw_name.replace("___", " - ").replace("_", " ")
+    return cleaned.title()
+
+# =====================================================================
+# --- ASSET LOADING ENGINE ---
+# =====================================================================
 @st.cache_resource 
 def load_all_assets():
-    # Load Version 1 (Multi-Head)
+    # 1. Load V1
     v1_model = tf.keras.models.load_model("crop_disease_v4.keras")
     
-    # Load Version 2 (Unified)
+    # 2. Load V2
     v2_model = tf.keras.models.load_model("crop_disease_unified_v2.keras")
-    
-    # Load the unified class names
     with open('class_indices.json', 'r') as f:
         class_map = json.load(f)
-    # Ensure they are in the correct numerical order
     v2_labels = [k for k, v in sorted(class_map.items(), key=lambda item: item[1])]
     
-    return v1_model, v2_model, v2_labels
+    # 3. Load V3 (PyTorch Custom CNN)
+    with open('pytoch_indices.json', 'r') as f:
+        pt_idx_to_class = json.load(f)
+    num_classes = len(pt_idx_to_class)
+    
+    pt_model = CNN_NeuralNet(3, num_classes)
+    pt_model.load_state_dict(torch.load("crop_disease_CNN_v3.pth", map_location=torch.device('cpu')))
+    pt_model.eval()
+    
+    # 4. Load OpenAI CLIP Foundation Pipeline
+    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    
+    return v1_model, v2_model, v2_labels, pt_model, pt_idx_to_class, clip_model, clip_processor
 
-v1_model, v2_model, v2_labels = load_all_assets()
+# Extract all running system models
+v1_model, v2_model, v2_labels, pt_model, pt_classes, clip_model, clip_processor = load_all_assets()
 
-# Constants for the old model structure
+# --- PROMPT ENSEMBLE MATH INFERENCE ENGINE ---
+def run_clip_ensemble_inference(image, target_class_list):
+    flat_prompts = []
+    prompt_to_class_idx = []
+    
+    for idx, class_name in enumerate(target_class_list):
+        sentences = CLIP_ENSEMBLE_MAP.get(class_name, [f"a photo of a leaf with {class_name}"])
+        for sentence in sentences:
+            flat_prompts.append(sentence)
+            prompt_to_class_idx.append(idx)
+            
+    inputs = clip_processor(text=flat_prompts, images=image, return_tensors="pt", padding=True)
+    
+    with torch.no_grad():
+        outputs = clip_model(**inputs)
+        logits_per_image = outputs.logits_per_image 
+        flat_probabilities = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
+        
+    class_accumulated_scores = np.zeros(len(target_class_list))
+    class_sentence_counts = np.zeros(len(target_class_list))
+    
+    for prob, class_idx in zip(flat_probabilities, prompt_to_class_idx):
+        class_accumulated_scores[class_idx] += prob
+        class_sentence_counts[class_idx] += 1
+        
+    final_class_probabilities = class_accumulated_scores / np.maximum(class_sentence_counts, 1)
+    final_class_probabilities = final_class_probabilities / np.sum(final_class_probabilities)
+    
+    best_idx = np.argmax(final_class_probabilities)
+    return target_class_list[best_idx], final_class_probabilities[best_idx]
+
+
+# =====================================================================
+# --- PREPROCESSING & APP INTERFACE ---
+# =====================================================================
+pytorch_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
 V1_CROP_NAMES = ['bean', 'maize', 'soya']
 V1_DISEASE_NAMES = [
     'Maize Gray Leaf Spot', 'Soybeans Healthy', 'Soybeans Bacterial Pustule', 
@@ -36,66 +511,111 @@ V1_DISEASE_NAMES = [
     'Beans Healthy', 'Soybeans Yellow Mosaic'
 ]
 
-# --- UI ---
-st.title("🌱 AI Crop Disease Detection: Model Comparison")
-st.write("Compare our initial multi-head model (V1) against the new unified balanced model (V2).")
+st.title("🌱 AI Crop Disease Detection: Pipeline Comparison Engine")
+st.write("Cross-framework analysis: Standard Neural Networks vs Semantic Vision Foundations.")
 
-uploaded_file = st.sidebar.file_uploader("Upload leaf image", type=["jpg", "jpeg", "png"])
+uploaded_file = st.sidebar.file_uploader("Upload leaf image for system evaluation", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.sidebar.image(image, caption='Original Image', use_container_width=True)
+    image = Image.open(uploaded_file).convert('RGB')
+    st.sidebar.image(image, caption='Original Input Image', use_container_width=True)
     
-    # Preprocess
-    img_prep = image.resize((224, 224))
-    img_array = tf.keras.utils.img_to_array(img_prep) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+    # Base Tensors / Arrays
+    img_tf = image.resize((224, 224))
+    img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
+    img_array_tf = np.expand_dims(img_array_tf, axis=0)
+    img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
 
-    with st.spinner('Running inference on both systems...'):
-        # Inference V1 (Multi-Head)
-        preds_v1 = v1_model.predict(img_array, verbose=0)
-        v1_c_idx = np.argmax(preds_v1[0])
-        v1_d_idx = np.argmax(preds_v1[1])
-        v1_crop = V1_CROP_NAMES[v1_c_idx]
-        v1_disease = V1_DISEASE_NAMES[v1_d_idx]
+    with st.spinner('Calculating parallel model execution...'):
+        # --- Model 1 ---
+        preds_v1 = v1_model.predict(img_array_tf, verbose=0)
+        v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
+        v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
         v1_conf = np.max(preds_v1[0])
 
-        # Inference V2 (Unified)
-        preds_v2 = v2_model.predict(img_array, verbose=0)
-        v2_idx = np.argmax(preds_v2[0])
-        v2_full_label = v2_labels[v2_idx]
+        # --- Model 2 ---
+        preds_v2 = v2_model.predict(img_array_tf, verbose=0)
+        v2_full_label = v2_labels[np.argmax(preds_v2[0])]
         v2_conf = np.max(preds_v2[0])
 
-    # --- LAYOUT COMPARISON ---
-    col1, col2 = st.columns(2)
+        # --- Model 3 (PyTorch CNN) ---
+        with torch.no_grad():
+            outputs = pt_model(img_tensor_pt)
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+            pt_idx = torch.argmax(probabilities).item()
+            pt_conf = probabilities[pt_idx].item()
+            pt_full_label = pt_classes[str(pt_idx)]
 
-    with col1:
-        st.subheader("Version 1: Multi-Head")
-        st.info("Uses separate outputs for Crop and Disease.")
-        st.metric("Detected Crop", v1_crop.title())
-        st.metric("Condition", v1_disease)
-        st.caption(f"Confidence: {v1_conf:.1%}")
+        # --- REVISED CLIP FOUNDATION LAYER WITH "UNKNOWN" SAFEGUARD ---
+        # Create a temporary copy of the labels and append the unknown class tag
+        clip_target_classes = list(v2_labels) + ['unknown_or_other']
         
-        # Check for logical mismatch
-        v1_crop_val = v1_crop.lower()
-        v1_disease_val = v1_disease.lower()
-        is_mismatch = not (v1_crop_val in v1_disease_val or (v1_crop_val == "soya" and "soybean" in v1_disease_val))
-        
-        if is_mismatch:
-            st.warning("⚠️ Logic Mismatch Detected")
-            st.caption("Model identified one crop but symptoms of another.")
+        # Run inference using the extended target class list
+        clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes)
 
-    with col2:
-        st.subheader("Version 2: Unified")
-        st.success("Uses single-output classification with balanced data.")
-        
-        # Format the label for display
-        v2_display = v2_full_label.replace("_", " ").title()
-        st.metric("Unified Prediction", v2_display)
-        st.caption(f"Confidence: {v2_conf:.1%}")
-        
-        st.write("Logical consistency guaranteed by architecture.")
+   # =====================================================================
+    # --- NEW STACKED COMPARISON LAYOUT (No more squished text) ---
+    # =====================================================================
+    st.markdown("### 📊 Pipeline Analysis Results")
+    
+    # 1. CLEAN UP THE TEXT STRINGS BEFORE VIEWING
+    v1_clean = f"{v1_crop.title()} - {v1_disease}"
+    v2_clean = format_disease_name(v2_full_label)
+    v3_clean = format_disease_name(pt_full_label)
+    clip_clean = format_disease_name(clip_label)
 
-    # Educational Insight for supervisor
-    if v1_crop == "soya" and "soya" not in v2_full_label.lower():
-        st.success("**Improvement Note:** The new model correctly avoided the Soya-bias seen in V1.")
+    # 2. CREATE A BEAUTIFUL COMPARISON TABLE
+    # Markdown tables give long disease names full horizontal room
+    comparison_matrix = f"""
+    | Pipeline Model | Framework Architecture | Predicted Classification | Confidence Score |
+    | :--- | :--- | :--- | :--- |
+    | **✨ CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
+    | **V3: Custom CNN** | PyTorch Residual Network | `{v3_clean}` | **{pt_conf:.1%}** |
+    | **V2: Unified Model** | TensorFlow Keras Single-Head | `{v2_clean}` | **{v2_conf:.1%}** |
+    | **V1: Multi-Head Model** | TensorFlow Keras Multi-Head | `{v1_clean}` | **{v1_conf:.1%}** |
+    """
+    st.markdown(comparison_matrix)
+    
+    st.markdown("---")
+    
+    # 3. VERTICAL DEEP DIVE SEPARATIONS
+    st.markdown("### 🔍 Model Breakdown Overview")
+    
+    # Row 1: CLIP
+    with st.container():
+        st.markdown(f"#### 🌟 OpenAI CLIP Foundation Model")
+        st.markdown(f"**Identified Target:** `{clip_clean}` &nbsp;|&nbsp; **System Confidence:** `{clip_conf:.1%}`")
+        st.caption("Status: Active semantic verification layer. Disregards background soil and lighting noise by mapping textures to linguistic concepts.")
+    
+    st.markdown("---")
+    
+    # Row 2: PyTorch CNN
+    with st.container():
+        st.markdown(f"#### 🎛️ V3: Custom PyTorch CNN")
+        st.markdown(f"**Identified Target:** `{v3_clean}` &nbsp;|&nbsp; **System Confidence:** `{pt_conf:.1%}`")
+        st.caption("Status: Local Custom Network. Evaluates localized pixel clusters; susceptible to fine-grain texture confusion.")
+
+    st.markdown("---")
+
+    # Row 3: Unified TF
+    with st.container():
+        st.markdown(f"#### 🧬 V2: Unified Keras Model")
+        st.markdown(f"**Identified Target:** `{v2_clean}` &nbsp;|&nbsp; **System Confidence:** `{v2_conf:.1%}`")
+        st.caption("Status: Legacy Unified Framework. Single-head dense layer projection.")
+
+    st.markdown("---")
+
+    # Row 4: Multi-Head TF (Handled separately since it splits Crop and Disease outputs)
+    with st.container():
+        st.markdown("#### 🌿 V1: Multi-Head Keras Model")
+        v1_matrix = f"""
+        | Segment Metric | Extracted Prediction | Feature Certainty |
+        | :--- | :--- | :--- |
+        | **Inferred Crop Type** | `{v1_crop.title()}` | {v1_conf:.1%} |
+        | **Inferred Condition** | `{v1_disease}` | {v1_conf:.1%} |
+        """
+        st.markdown(v1_matrix)
+
+    # Bottom Insight Note
+    st.markdown("---")
+    st.info("**Architectural Insight:** If traditional convolutional models (V1-V3) map background parameters incorrectly, the top-level CLIP Matrix should be leveraged as the final diagnostic decision boundary.")

@@ -3,3 +3,6 @@ streamlit
 numpy
 Pillow
 matplotlib
+torch --index-url https://download.pytorch.org/rls/cpu
+torchvision --index-url https://download.pytorch.org/rls/cpu
+transformers
