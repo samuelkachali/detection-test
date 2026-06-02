@@ -307,29 +307,34 @@ CLIP_ENSEMBLE_MAP = {
         "grayish rectangular blocky spots on a corn leaf"
     ],
     'beans_rust': [
-        "a bean leaf covered in raised reddish-brown rust spore pustules",
-        "phaseolus vulgaris bean leaf with powdery golden rust blisters",
-        "rust fungal breakout spotting a green bean leaf"
+        "a photo of common bean rust, absolutely not a soybean crop",
+        "common green beans showing rust, distinct from soyabeans",
+        "a common green bean leaf with raised reddish-brown rust spore pustules",
+        "phaseolus vulgaris bean plant showing rust spots next to smooth green bean pods",
+        "garden bean foliage with powdery golden rust blisters running along leaf veins",
+        "dry edible bean crop showing brown rust fungal breakout on leaves",
+        "smooth pods", "characteristic leaf texture", "non-pubescent stems",
+        "Brown, black or white spore pustules on leaves, stems or pods"
     ],
-    'beans_angular_leaf_spot': [
-        "a bean leaf with angular leaf spot geometric lesions",
-        "angular leaf spot causing dark brown square lesions on a bean leaf",
-        "phaseolus vulgaris bean leaf infected with angular leaf spot"
-    ],
+    
     'beans_healthy': [
-        "a healthy green bean crop leaf",
-        "clean pristine common bean plant foliage",
-        "a healthy green bean leaf without spots or mold"
+        "a healthy green common bean leaf without any spots",
+        "pristine smooth green bean plant foliage and healthy pods",
+        "clean phaseolus vulgaris bean leaves free of disease"
     ],
+
     'soyabeans_rust': [
         "a soybean leaf with small red-brown volcanic rust pustules on the underside",
-        "asian soybean rust disease destroying a soy plant leaf",
-        "brown powdery rust blisters covering a yellowing soybean leaf"
+        "asian soybean rust disease causing severe yellowing on fuzzy soy plant foliage",
+        "brown powdery rust blisters covering a soybean leaf near hairy soybean pods",
+        "glycine max agricultural field crop infected with soybean rust",
+        "hairy structures", "fuzzy pods", "volcanic rust pustules"
     ],
+    
     'soyabeans_healthy': [
         "a clean healthy green soybean leaf with zero spots",
-        "pristine green soy plant foliage",
-        "a perfectly healthy soybean leaf surface"
+        "pristine fuzzy green soy plant foliage",
+        "a perfectly healthy glycine max soybean leaf surface"
     ],
     'soyabeans_suddendeathsyndrome': [
         "a soybean leaf showing severe yellow blotches between veins with a green midrib",
@@ -573,7 +578,7 @@ if uploaded_file is not None:
     comparison_matrix = f"""
     | Pipeline Model | Framework Architecture | Predicted Classification | Confidence Score |
     | :--- | :--- | :--- | :--- |
-    | **✨ CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
+    | **CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
     | **V3: Custom CNN** | PyTorch Residual Network | `{v3_clean}` | **{pt_conf:.1%}** |
     | **V2: Unified Model** | TensorFlow Keras Single-Head | `{v2_clean}` | **{v2_conf:.1%}** |
     | **V1: Multi-Head Model** | TensorFlow Keras Multi-Head | `{v1_clean}` | **{v1_conf:.1%}** |
