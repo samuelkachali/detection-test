@@ -1,12 +1,20 @@
 import os
+import gc
 # Optimizations for local CPU execution environments
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import streamlit as st
 import tensorflow as tf
 import torch
+torch.set_num_threads(1)
+if hasattr(tf, 'config') and hasattr(tf.config, 'experimental'):
+    # Prevent TensorFlow from allocating all memory upfront
+    gpus = tf.config.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 import torch.nn as nn
 import torchvision.transforms as transforms
 import numpy as np
@@ -612,6 +620,9 @@ if uploaded_file is not None:
     st.markdown(comparison_matrix)
     
     st.markdown("---")
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     
     #  VISUAL BOUNDING-BOX RENDERING 
