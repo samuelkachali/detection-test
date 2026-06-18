@@ -461,7 +461,15 @@ def load_all_assets():
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     
     # 5. NEW: Load YOLO Localization Model (Can switch weights file paths as needed)
-    yolo_model = YOLO("yolov8n.pt")
+    base_path = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
+    yolo_weight_path = os.path.join(base_path, "best.pt")
+
+    if not os.path.exists(yolo_weight_path):
+        st.error(f"🚨 Critical Asset Missing: Put your weights file at {yolo_weight_path}")
+        st.stop()
+
+    # Load your custom trained model weights
+    yolo_model = YOLO(yolo_weight_path)
     
     return v1_model, v2_model, v2_labels, pt_model, pt_idx_to_class, clip_model, clip_processor, yolo_model
 
@@ -558,25 +566,30 @@ if uploaded_file is not None:
         clip_target_classes = list(v2_labels) + ['unknown_or_other']
         clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes)
 
-        # --- NEW Model 5: YOLO Bounding-Box Localization Engine ---
+        # --- NEW Model 5: YOLO Classification Engine ---
         # Ultralytics handles internal scaling automatically on PIL structures
-        yolo_results = yolo_model(image, verbose=False)[0]
-        
-        # Parse bounding data matrix to extract structural results
-        if len(yolo_results.boxes) > 0:
-            best_box_idx = torch.argmax(yolo_results.boxes.conf).item()
-            yolo_class_id = int(yolo_results.boxes.cls[best_box_idx].item())
-            yolo_label = yolo_results.names[yolo_class_id]
-            yolo_conf = yolo_results.boxes.conf[best_box_idx].item()
-            
-            # Plot the layer boundaries to a standard RGB numpy array
-            annotated_bgr = yolo_results.plot()
-            annotated_rgb = annotated_bgr[:, :, ::-1]
-        else:
-            yolo_label = "No Features Localized"
-            yolo_conf = 0.0
-            annotated_rgb = None
+        results = yolo_model(image)
 
+        # 1. Initialize default values in case nothing is detected
+        yolo_label = "No Features Localized"
+        yolo_conf = 0.0
+        annotated_rgb = None
+
+    # 2. Check if YOLO found classification probabilities safely using results[0].probs
+    if results and results[0].probs is not None:
+        first_result = results[0]  # Grab the actual prediction result object
+        
+        # Extract the classification class index with the highest probability score
+        best_class_idx = first_result.probs.top1
+        yolo_label = first_result.names[best_class_idx]
+        yolo_conf = first_result.probs.top1conf.item()
+        
+        # For classification, there are no bounding boxes to plot. 
+        # We can pass the input image forward for the UI layout blocks.
+        annotated_image = image
+        # st.image(annotated_image, caption=f"YOLOv8 Class Match: {format_disease_name(yolo_label)} ({yolo_conf:.2%})", use_container_width=True)
+    else:
+        st.info("YOLO Classification Engine was unable to process the asset matrix.")
     # =====================================================================
     # --- UPDATED COMPARISON MATRIX GRID ---
     # =====================================================================
