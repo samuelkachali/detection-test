@@ -603,8 +603,8 @@ if uploaded_file is not None:
     comparison_matrix = f"""
     | Pipeline Model | Framework Architecture | Predicted Classification | Confidence Score |
     | :--- | :--- | :--- | :--- |
-    | ** YOLO Object Detect** | Ultralytics Bounding Layer | `{yolo_clean}` | **{yolo_conf:.1%}** |
-    | ** CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
+    | **YOLO Object Detect** | Ultralytics Bounding Layer | `{yolo_clean}` | **{yolo_conf:.1%}** |
+    | **CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
     | **V3: Custom CNN** | PyTorch Residual Network | `{v3_clean}` | **{pt_conf:.1%}** |
     | **V2: Unified Model** | TensorFlow Keras Single-Head | `{v2_clean}` | **{v2_conf:.1%}** |
     | **V1: Multi-Head Model** | TensorFlow Keras Multi-Head | `{v1_clean}` | **{v1_conf:.1%}** |
