@@ -18,9 +18,8 @@ from ultralytics import YOLO  # NEW: YOLO Object Detection Core
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Model Comparison Pipeline - Crop AI", page_icon="🌱", layout="wide")
 
-# =====================================================================
 # --- CUSTOM CNN MODEL DEFINITION (Matches saved PyTorch weights) ---
-# =====================================================================
+
 class CNN_NeuralNet(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
@@ -95,9 +94,8 @@ class CNN_NeuralNet(nn.Module):
         return out
 
 
-# =====================================================================
-# --- CLIP ENSEMBLE PROMPT MAP ---
-# =====================================================================
+#  CLIP ENSEMBLE PROMPT MAP 
+
 CLIP_ENSEMBLE_MAP = {
     'Tomato___Late_blight': [
         "a tomato leaf with dark water-soaked spots from late blight disease",
@@ -369,7 +367,7 @@ CLIP_ENSEMBLE_MAP = {
     ]
 }
 
-# --- CLEAN DISPLAY NAMES FOR THE UI ---
+#  CLEAN DISPLAY NAMES FOR THE UI 
 DISPLAY_NAME_MAP = {
     'Tomato___Late_blight': 'Tomato - Late Blight',
     'Tomato___healthy': 'Tomato - Healthy',
@@ -433,9 +431,9 @@ def format_disease_name(raw_name):
     cleaned = raw_name.replace("___", " - ").replace("_", " ")
     return cleaned.title()
 
-# =====================================================================
-# --- ASSET LOADING ENGINE ---
-# =====================================================================
+
+# ASSET LOADING ENGINE 
+
 @st.cache_resource 
 def load_all_assets():
     # 1. Load V1 (TensorFlow Keras Multi-Head)
@@ -476,7 +474,7 @@ def load_all_assets():
 # Extract running assets
 v1_model, v2_model, v2_labels, pt_model, pt_classes, clip_model, clip_processor, yolo_model = load_all_assets()
 
-# --- PROMPT ENSEMBLE MATH INFERENCE ENGINE ---
+#  PROMPT ENSEMBLE MATH INFERENCE ENGINE
 def run_clip_ensemble_inference(image, target_class_list):
     flat_prompts = []
     prompt_to_class_idx = []
@@ -508,9 +506,8 @@ def run_clip_ensemble_inference(image, target_class_list):
     return target_class_list[best_idx], final_class_probabilities[best_idx]
 
 
-# =====================================================================
-# --- PREPROCESSING & APP INTERFACE ---
-# =====================================================================
+#  PREPROCESSING & APP INTERFACE 
+
 pytorch_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -543,18 +540,18 @@ if uploaded_file is not None:
     img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
 
     with st.spinner('Calculating parallel model execution...'):
-        # --- Model 1: Multi-Head TF ---
+        #  Model 1: Multi-Head TF 
         preds_v1 = v1_model.predict(img_array_tf, verbose=0)
         v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
         v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
         v1_conf = np.max(preds_v1[0])
 
-        # --- Model 2: Unified TF ---
+        # Model 2: Unified TF 
         preds_v2 = v2_model.predict(img_array_tf, verbose=0)
         v2_full_label = v2_labels[np.argmax(preds_v2[0])]
         v2_conf = np.max(preds_v2[0])
 
-        # --- Model 3: PyTorch CNN ---
+        # Model 3: PyTorch CNN 
         with torch.no_grad():
             outputs = pt_model(img_tensor_pt)
             probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
@@ -562,11 +559,11 @@ if uploaded_file is not None:
             pt_conf = probabilities[pt_idx].item()
             pt_full_label = pt_classes[str(pt_idx)]
 
-        # --- Model 4: CLIP Foundation Layer with "Unknown" Safeguard ---
+        #  Model 4: CLIP Foundation Layer with "Unknown" Safeguard 
         clip_target_classes = list(v2_labels) + ['unknown_or_other']
         clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes)
 
-        # --- NEW Model 5: YOLO Classification Engine ---
+        #  NEW Model 5: YOLO Classification Engine 
         # Ultralytics handles internal scaling automatically on PIL structures
         results = yolo_model(image)
 
@@ -590,9 +587,9 @@ if uploaded_file is not None:
         # st.image(annotated_image, caption=f"YOLOv8 Class Match: {format_disease_name(yolo_label)} ({yolo_conf:.2%})", use_container_width=True)
     else:
         st.info("YOLO Classification Engine was unable to process the asset matrix.")
-    # =====================================================================
-    # --- UPDATED COMPARISON MATRIX GRID ---
-    # =====================================================================
+
+    #  UPDATED COMPARISON MATRIX GRID ---
+
     st.markdown("### 📊 Pipeline Analysis Results")
     
     # Process text output mappings uniformly
@@ -606,8 +603,8 @@ if uploaded_file is not None:
     comparison_matrix = f"""
     | Pipeline Model | Framework Architecture | Predicted Classification | Confidence Score |
     | :--- | :--- | :--- | :--- |
-    | **🎯 YOLO Object Detect** | Ultralytics Bounding Layer | `{yolo_clean}` | **{yolo_conf:.1%}** |
-    | **🌟 CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
+    | ** YOLO Object Detect** | Ultralytics Bounding Layer | `{yolo_clean}` | **{yolo_conf:.1%}** |
+    | ** CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
     | **V3: Custom CNN** | PyTorch Residual Network | `{v3_clean}` | **{pt_conf:.1%}** |
     | **V2: Unified Model** | TensorFlow Keras Single-Head | `{v2_clean}` | **{v2_conf:.1%}** |
     | **V1: Multi-Head Model** | TensorFlow Keras Multi-Head | `{v1_clean}` | **{v1_conf:.1%}** |
@@ -616,22 +613,22 @@ if uploaded_file is not None:
     
     st.markdown("---")
     
-    # =====================================================================
-    # --- VISUAL BOUNDING-BOX RENDERING ---
-    # =====================================================================
+    
+    #  VISUAL BOUNDING-BOX RENDERING 
+   
     if annotated_rgb is not None:
-        st.markdown("### 🔍 YOLO Localized Feature Mapping")
+        st.markdown("###  YOLO Localized Feature Mapping")
         st.image(annotated_rgb, caption="YOLO Bounding Box Localization (Pustules/Lesions Map)", use_container_width=True)
         st.markdown("---")
     
-    # =====================================================================
-    # --- MODEL BREAKDOWN CONTAINERS ---
-    # =====================================================================
+
+    #  MODEL BREAKDOWN CONTAINERS 
+
     st.markdown("### 🔍 Model Breakdown Overview")
     
     # Row 0: YOLO
     with st.container():
-        st.markdown(f"#### 🎯 Ultralytics YOLO Localization Framework")
+        st.markdown(f"####  Ultralytics YOLO Localization Framework")
         st.markdown(f"**Top Detected Object Patch:** `{yolo_clean}` &nbsp;|&nbsp; **Local Feature Certainty:** `{yolo_conf:.1%}`")
         st.caption("Status: Active localization layer. Explicitly maps coordinates of tissue discoloration to target labels.")
 
@@ -639,7 +636,7 @@ if uploaded_file is not None:
     
     # Row 1: CLIP
     with st.container():
-        st.markdown(f"#### 🌟 OpenAI CLIP Foundation Model")
+        st.markdown(f"####  OpenAI CLIP Foundation Model")
         st.markdown(f"**Identified Target:** `{clip_clean}` &nbsp;|&nbsp; **System Confidence:** `{clip_conf:.1%}`")
         st.caption("Status: Active semantic verification layer. Disregards background soil and lighting noise by mapping textures to linguistic concepts.")
     
@@ -647,7 +644,7 @@ if uploaded_file is not None:
     
     # Row 2: PyTorch CNN
     with st.container():
-        st.markdown(f"#### 🎛️ V3: Custom PyTorch CNN")
+        st.markdown(f"####  V3: Custom PyTorch CNN")
         st.markdown(f"**Identified Target:** `{v3_clean}` &nbsp;|&nbsp; **System Confidence:** `{pt_conf:.1%}`")
         st.caption("Status: Local Custom Network. Evaluates localized pixel clusters; susceptible to fine-grain texture confusion.")
 
@@ -655,7 +652,7 @@ if uploaded_file is not None:
 
     # Row 3: Unified TF
     with st.container():
-        st.markdown(f"#### 🧬 V2: Unified Keras Model")
+        st.markdown(f"####  V2: Unified Keras Model")
         st.markdown(f"**Identified Target:** `{v2_clean}` &nbsp;|&nbsp; **System Confidence:** `{v2_conf:.1%}`")
         st.caption("Status: Legacy Unified Framework. Single-head dense layer projection.")
 
@@ -663,7 +660,7 @@ if uploaded_file is not None:
 
     # Row 4: Multi-Head TF
     with st.container():
-        st.markdown("#### 🌿 V1: Multi-Head Keras Model")
+        st.markdown("####  V1: Multi-Head Keras Model")
         v1_matrix = f"""
         | Segment Metric | Extracted Prediction | Feature Certainty |
         | :--- | :--- | :--- |
