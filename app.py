@@ -22,6 +22,17 @@ from PIL import Image
 import json
 from transformers import CLIPProcessor, CLIPModel
 from ultralytics import YOLO  # NEW: YOLO Object Detection Core
+import logging
+import warnings
+
+# Hide the standard framework warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*__path__.*")
+
+# Target the transformers internal tracker and set it to only report CRITICAL errors
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers.models").setLevel(logging.CRITICAL)
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Model Comparison Pipeline - Crop AI", page_icon="🌱", layout="wide")
@@ -436,8 +447,84 @@ def format_disease_name(raw_name):
     """Fallback function that formats the name if it's missing from the map"""
     if raw_name in DISPLAY_NAME_MAP:
         return DISPLAY_NAME_MAP[raw_name]
-    cleaned = raw_name.replace("___", " - ").replace("_", " ")
+    cleaned = str(raw_name).replace("___", " - ").replace("_", " ")
     return cleaned.title()
+
+
+def format_crop_name(raw_name):
+    """Convert the raw crop label into a readable display name."""
+    normalized = str(raw_name).strip().lower()
+    aliases = {
+        "bean": "Bean",
+        "beans": "Bean",
+        "maize": "Maize",
+        "corn": "Maize",
+        "soya": "Soybean",
+        "soyabean": "Soybean",
+        "soybeans": "Soybean",
+        "soybean": "Soybean",
+        "potato": "Potato",
+        "tomato": "Tomato",
+        "grape": "Grape",
+        "apple": "Apple",
+        "orange": "Orange",
+        "peach": "Peach",
+        "cherry": "Cherry",
+        "strawberry": "Strawberry",
+        "blueberry": "Blueberry",
+        "pepper": "Bell Pepper",
+        "squash": "Squash",
+        "raspberry": "Raspberry",
+    }
+    return aliases.get(normalized, format_disease_name(raw_name))
+
+
+def format_label_name(raw_name):
+    """Render a general label in a human-readable form."""
+    if not raw_name:
+        return "Unknown"
+    cleaned = str(raw_name).replace("___", " - ").replace("_", " ")
+    return cleaned.title()
+
+
+def resolve_consensus_labels(yolo_label, fallback_crop, fallback_disease):
+    """Use YOLO as the master anchor and lock the displayed crop/disease labels."""
+    label = str(yolo_label or "").strip().lower()
+
+    crop_aliases = [
+        ("maize", "Maize"),
+        ("corn", "Maize"),
+        ("soyabean", "Soybean"),
+        ("soybean", "Soybean"),
+        ("soya", "Soybean"),
+        ("bean", "Bean"),
+        ("beans", "Bean"),
+        ("tomato", "Tomato"),
+        ("potato", "Potato"),
+        ("grape", "Grape"),
+        ("apple", "Apple"),
+        ("orange", "Orange"),
+        ("peach", "Peach"),
+        ("cherry", "Cherry"),
+        ("strawberry", "Strawberry"),
+        ("blueberry", "Blueberry"),
+        ("pepper", "Bell Pepper"),
+        ("squash", "Squash"),
+        ("raspberry", "Raspberry"),
+    ]
+
+    resolved_crop = format_crop_name(fallback_crop)
+    for alias, crop_name in crop_aliases:
+        if label.startswith(alias):
+            resolved_crop = crop_name
+            break
+
+    resolved_disease = format_disease_name(fallback_disease)
+    yolo_disease = format_disease_name(yolo_label)
+    if yolo_disease and yolo_disease != "Unknown":
+        resolved_disease = yolo_disease
+
+    return resolved_crop, resolved_disease
 
 
 # ASSET LOADING ENGINE 
@@ -536,30 +623,66 @@ st.write("Cross-framework analysis: Standard CNN Classifier Layers vs Semantic V
 
 uploaded_file = st.sidebar.file_uploader("Upload leaf image for system evaluation", type=["jpg", "jpeg", "png"])
 
-if uploaded_file is not None:
-    # Open base target image non-destructively
-    image = Image.open(uploaded_file).convert('RGB')
-    st.sidebar.image(image, caption='Original Input Image', use_container_width=True)
-    
-    # Formulate Base Tensors / Arrays for classic workflows
-    img_tf = image.resize((224, 224))
-    img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
-    img_array_tf = np.expand_dims(img_array_tf, axis=0)
-    img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
+# =====================================================================
+# --- PRODUCTION-GRADE PIPELINE GUARDRAILS ---
+# =====================================================================
 
-    with st.spinner('Calculating parallel model execution...'):
-        #  Model 1: Multi-Head TF 
+if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert('RGB')
+    st.sidebar.image(image, caption='Original Input Image', width='stretch')
+    
+    # -----------------------------------------------------------------
+    # GATE 1: The Semantic Guardrail (CLIP)
+    # -----------------------------------------------------------------
+    with st.spinner('Validating image domain safety...'):
+        clip_target_classes = list(v2_labels) + ['unknown_or_other']
+        clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes)
+
+    # If CLIP spots random noise, a selfie, or household objects, halt execution instantly!
+    if clip_label == 'unknown_or_other' and clip_conf > 0.35:
+        st.error("❌ **Invalid Domain:** This image does not appear to be an agricultural crop or plant leaf. Please upload or capture a valid crop sample.")
+        st.info("💡 **Why this happens:** Algorithms flag non-plant objects (like shoes, electronics, faces, or text) to protect classifier integrity.")
+        st.stop() # 🛑 STOPS THE SCRIPT COMPLETELY. No memory wasted on further models!
+
+    # -----------------------------------------------------------------
+    # GATE 2: Feature Quality & Presence (YOLO)
+    # -----------------------------------------------------------------
+    with st.spinner('Localizing crop features...'):
+        results = yolo_model(image)
+
+    # Validate if your custom YOLO classifier can extract features safely
+    if not results or results[0].probs is None:
+        st.warning("⚠️ **Low Quality Input:** Plant tissue recognized, but we cannot confidently isolate distinct structural features or lesion patches. Please take a clearer, closer photo.")
+        st.stop() # 🛑 STOPS RUNNING.
+
+    # If it passes both checkpoints, parse your validated YOLO metrics safely
+    first_result = results[0]
+    best_class_idx = first_result.probs.top1
+    yolo_label = first_result.names[best_class_idx]
+    yolo_conf = first_result.probs.top1conf.item()
+
+    # -----------------------------------------------------------------
+    # GATE 3: Core Disease Classification (The Deep Frameworks)
+    # -----------------------------------------------------------------
+    with st.spinner('Analyzing plant pathology patterns...'):
+        # Formulate Tensors ONLY when structurally validated!
+        img_tf = image.resize((224, 224))
+        img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
+        img_array_tf = np.expand_dims(img_array_tf, axis=0)
+        img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
+
+        # --- Model 1: Multi-Head TF ---
         preds_v1 = v1_model.predict(img_array_tf, verbose=0)
         v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
         v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
         v1_conf = np.max(preds_v1[0])
 
-        # Model 2: Unified TF 
+        # --- Model 2: Unified TF ---
         preds_v2 = v2_model.predict(img_array_tf, verbose=0)
         v2_full_label = v2_labels[np.argmax(preds_v2[0])]
         v2_conf = np.max(preds_v2[0])
 
-        # Model 3: PyTorch CNN 
+        # --- Model 3: PyTorch CNN ---
         with torch.no_grad():
             outputs = pt_model(img_tensor_pt)
             probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
@@ -567,119 +690,24 @@ if uploaded_file is not None:
             pt_conf = probabilities[pt_idx].item()
             pt_full_label = pt_classes[str(pt_idx)]
 
-        #  Model 4: CLIP Foundation Layer with "Unknown" Safeguard 
-        clip_target_classes = list(v2_labels) + ['unknown_or_other']
-        clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes)
+    st.subheader("🔎 Detection Results")
+    st.success("The pipeline completed successfully and produced the following predictions.")
 
-        #  NEW Model 5: YOLO Classification Engine 
-        # Ultralytics handles internal scaling automatically on PIL structures
-        results = yolo_model(image)
+    crop_name = format_crop_name(v1_crop)
+    disease_name = format_disease_name(v2_full_label)
+    yolo_name = format_label_name(yolo_label)
+    consensus_crop, consensus_disease = resolve_consensus_labels(yolo_label, v1_crop, v2_full_label)
 
-        # 1. Initialize default values in case nothing is detected
-        yolo_label = "No Features Localized"
-        yolo_conf = 0.0
-        annotated_rgb = None
+    col1, col2, col3 = st.columns(3)
+    col1.metric("YOLO Class", yolo_name, f"{yolo_conf:.0%}")
+    col2.metric("Consensus Crop", consensus_crop, f"{v1_conf:.0%}")
+    col3.metric("Consensus Disease", consensus_disease, f"{v2_conf:.0%}")
 
-    # 2. Check if YOLO found classification probabilities safely using results[0].probs
-    if results and results[0].probs is not None:
-        first_result = results[0]  # Grab the actual prediction result object
-        
-        # Extract the classification class index with the highest probability score
-        best_class_idx = first_result.probs.top1
-        yolo_label = first_result.names[best_class_idx]
-        yolo_conf = first_result.probs.top1conf.item()
-        
-        # For classification, there are no bounding boxes to plot. 
-        # We can pass the input image forward for the UI layout blocks.
-        annotated_image = image
-        # st.image(annotated_image, caption=f"YOLOv8 Class Match: {format_disease_name(yolo_label)} ({yolo_conf:.2%})", use_container_width=True)
-    else:
-        st.info("YOLO Classification Engine was unable to process the asset matrix.")
+    st.write(f"**Primary crop:** {consensus_crop}")
+    st.write(f"**Primary disease:** {consensus_disease}")
+    st.write(f"**YOLO anchor confidence:** {yolo_conf:.2%}")
+    st.caption("YOLO is being used as the master anchor for the final displayed crop and disease labels.")
 
-    #  UPDATED COMPARISON MATRIX GRID ---
-
-    st.markdown("### 📊 Pipeline Analysis Results")
-    
-    # Process text output mappings uniformly
-    v1_clean = f"{v1_crop.title()} - {v1_disease}"
-    v2_clean = format_disease_name(v2_full_label)
-    v3_clean = format_disease_name(pt_full_label)
-    clip_clean = format_disease_name(clip_label)
-    yolo_clean = format_disease_name(yolo_label)
-
-    # Output grid featuring YOLO as top tier object localizer
-    comparison_matrix = f"""
-    | Pipeline Model | Framework Architecture | Predicted Classification | Confidence Score |
-    | :--- | :--- | :--- | :--- |
-    | **YOLO Object Detect** | Ultralytics Bounding Layer | `{yolo_clean}` | **{yolo_conf:.1%}** |
-    | **CLIP Foundation** | OpenAI ViT Semantic Guard | `{clip_clean}` | **{clip_conf:.1%}** |
-    | **V3: Custom CNN** | PyTorch Residual Network | `{v3_clean}` | **{pt_conf:.1%}** |
-    | **V2: Unified Model** | TensorFlow Keras Single-Head | `{v2_clean}` | **{v2_conf:.1%}** |
-    | **V1: Multi-Head Model** | TensorFlow Keras Multi-Head | `{v1_clean}` | **{v1_conf:.1%}** |
-    """
-    st.markdown(comparison_matrix)
-    
-    st.markdown("---")
+    # Force clean garbage collection right after mathematical predictions complete
+    import gc
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
-    
-    #  VISUAL BOUNDING-BOX RENDERING 
-   
-    if annotated_rgb is not None:
-        st.markdown("###  YOLO Localized Feature Mapping")
-        st.image(annotated_rgb, caption="YOLO Bounding Box Localization (Pustules/Lesions Map)", use_container_width=True)
-        st.markdown("---")
-    
-
-    #  MODEL BREAKDOWN CONTAINERS 
-
-    st.markdown("### 🔍 Model Breakdown Overview")
-    
-    # Row 0: YOLO
-    with st.container():
-        st.markdown(f"####  Ultralytics YOLO Localization Framework")
-        st.markdown(f"**Top Detected Object Patch:** `{yolo_clean}` &nbsp;|&nbsp; **Local Feature Certainty:** `{yolo_conf:.1%}`")
-        st.caption("Status: Active localization layer. Explicitly maps coordinates of tissue discoloration to target labels.")
-
-    st.markdown("---")
-    
-    # Row 1: CLIP
-    with st.container():
-        st.markdown(f"####  OpenAI CLIP Foundation Model")
-        st.markdown(f"**Identified Target:** `{clip_clean}` &nbsp;|&nbsp; **System Confidence:** `{clip_conf:.1%}`")
-        st.caption("Status: Active semantic verification layer. Disregards background soil and lighting noise by mapping textures to linguistic concepts.")
-    
-    st.markdown("---")
-    
-    # Row 2: PyTorch CNN
-    with st.container():
-        st.markdown(f"####  V3: Custom PyTorch CNN")
-        st.markdown(f"**Identified Target:** `{v3_clean}` &nbsp;|&nbsp; **System Confidence:** `{pt_conf:.1%}`")
-        st.caption("Status: Local Custom Network. Evaluates localized pixel clusters; susceptible to fine-grain texture confusion.")
-
-    st.markdown("---")
-
-    # Row 3: Unified TF
-    with st.container():
-        st.markdown(f"####  V2: Unified Keras Model")
-        st.markdown(f"**Identified Target:** `{v2_clean}` &nbsp;|&nbsp; **System Confidence:** `{v2_conf:.1%}`")
-        st.caption("Status: Legacy Unified Framework. Single-head dense layer projection.")
-
-    st.markdown("---")
-
-    # Row 4: Multi-Head TF
-    with st.container():
-        st.markdown("####  V1: Multi-Head Keras Model")
-        v1_matrix = f"""
-        | Segment Metric | Extracted Prediction | Feature Certainty |
-        | :--- | :--- | :--- |
-        | **Inferred Crop Type** | `{v1_crop.title()}` | {v1_conf:.1%} |
-        | **Inferred Condition** | `{v1_disease}` | {v1_conf:.1%} |
-        """
-        st.markdown(v1_matrix)
-
-    # Bottom Insight Note
-    st.markdown("---")
-    st.info("**Architectural Insight:** Cross-referencing YOLO's localized region bounding maps with CLIP's linguistic semantic classifications creates a robust framework validation safety net for edge deployments.")
