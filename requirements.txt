@@ -1,5 +1,5 @@
 streamlit==1.57.0
-tensorflow-cpu
+tensorflow-cpu==2.16.1
 torch==2.2.2 --extra-index-url https://pytorch.org
 torchvision==0.17.2 --extra-index-url https://pytorch.org
 transformers==4.39.3
