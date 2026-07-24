@@ -531,34 +531,52 @@ def resolve_consensus_labels(yolo_label, fallback_crop, fallback_disease):
 
 @st.cache_resource 
 def load_all_assets():
-    # 1. Load V1 (TensorFlow Keras Multi-Head)
-    v1_model = tf.keras.models.load_model("crop_disease_v4.keras")
+    base_path = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
+
+    # 1. Load V1 (TensorFlow Keras Multi-Head - Optional check)
+    v1_path = os.path.join(base_path, "crop_disease_v4.keras")
+    v1_model = tf.keras.models.load_model(v1_path) if os.path.exists(v1_path) else None
     
-    # 2. Load V2 (TensorFlow Keras Single-Head)
-    v2_model = tf.keras.models.load_model("crop_disease_unified_v2.keras")
-    with open('class_indices.json', 'r') as f:
+    # 2. Load V2 (TensorFlow Keras Single-Head - Updated to match your exact file: best_model_unified.keras)
+    v2_path = os.path.join(base_path, "best_model_unified.keras")
+    if not os.path.exists(v2_path):
+        st.error(f"🚨 Critical Asset Missing: Put your model file at {v2_path}")
+        st.stop()
+    v2_model = tf.keras.models.load_model(v2_path)
+
+    # Load class indices (handles class_indices.json or class_indices)
+    json_path = os.path.join(base_path, "class_indices.json")
+    if not os.path.exists(json_path):
+        json_path = os.path.join(base_path, "class_indices")
+    
+    with open(json_path, 'r') as f:
         class_map = json.load(f)
     v2_labels = [k for k, v in sorted(class_map.items(), key=lambda item: item[1])]
     
-    # 3. Load V3 (PyTorch Custom CNN)
-    with open('pytoch_indices.json', 'r') as f:
-        pt_idx_to_class = json.load(f)
-    num_classes = len(pt_idx_to_class)
+    # 3. Load V3 (PyTorch Custom CNN - Optional check)
+    pt_path = os.path.join(base_path, "crop_disease_CNN_v3.pth")
+    pt_indices_path = os.path.join(base_path, "pytoch_indices.json")
     
-    pt_model = CNN_NeuralNet(3, num_classes)
-    pt_model.load_state_dict(torch.load("crop_disease_CNN_v3.pth", map_location=torch.device('cpu')))
-    pt_model.eval()
+    pt_model, pt_idx_to_class = None, {}
+    if os.path.exists(pt_path) and os.path.exists(pt_indices_path):
+        with open(pt_indices_path, 'r') as f:
+            pt_idx_to_class = json.load(f)
+        num_classes = len(pt_idx_to_class)
+        pt_model = CNN_NeuralNet(3, num_classes)
+        pt_model.load_state_dict(torch.load(pt_path, map_location=torch.device('cpu')))
+        pt_model.eval()
     
     # 4. Load OpenAI CLIP Foundation Pipeline
     clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     
-    # 5. NEW: Load YOLO Localization Model (Can switch weights file paths as needed)
-    base_path = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
-    yolo_weight_path = os.path.join(base_path, "best.pt")
+    # 5. NEW: Load YOLO Localization Model (Updated to match yolo_crop_disease_best.pt)
+    yolo_weight_path = os.path.join(base_path, "yolo_crop_disease_best.pt")
+    if not os.path.exists(yolo_weight_path):
+        yolo_weight_path = os.path.join(base_path, "best.pt")
 
     if not os.path.exists(yolo_weight_path):
-        st.error(f"🚨 Critical Asset Missing: Put your weights file at {yolo_weight_path}")
+        st.error(f"🚨 Critical Asset Missing: Put 'yolo_crop_disease_best.pt' in your folder: {base_path}")
         st.stop()
 
     # Load your custom trained model weights
@@ -645,21 +663,24 @@ if uploaded_file is not None:
         st.stop() # 🛑 STOPS THE SCRIPT COMPLETELY. No memory wasted on further models!
 
     # -----------------------------------------------------------------
-    # GATE 2: Feature Quality & Presence (YOLO)
+    # GATE 2: Feature Quality & Presence (YOLO Detection)
     # -----------------------------------------------------------------
     with st.spinner('Localizing crop features...'):
         results = yolo_model(image)
 
-    # Validate if your custom YOLO classifier can extract features safely
-    if not results or results[0].probs is None:
+    # Check if YOLO detected any bounding boxes in the image
+    if not results or len(results[0].boxes) == 0:
         st.warning("⚠️ **Low Quality Input:** Plant tissue recognized, but we cannot confidently isolate distinct structural features or lesion patches. Please take a clearer, closer photo.")
         st.stop() # 🛑 STOPS RUNNING.
 
-    # If it passes both checkpoints, parse your validated YOLO metrics safely
+    # Parse top bounding box metrics safely
     first_result = results[0]
-    best_class_idx = first_result.probs.top1
+    boxes = first_result.boxes
+    best_box_idx = torch.argmax(boxes.conf).item()
+    best_class_idx = int(boxes.cls[best_box_idx].item())
+
     yolo_label = first_result.names[best_class_idx]
-    yolo_conf = first_result.probs.top1conf.item()
+    yolo_conf = float(boxes.conf[best_box_idx].item())
 
     # -----------------------------------------------------------------
     # GATE 3: Core Disease Classification (The Deep Frameworks)
@@ -669,38 +690,41 @@ if uploaded_file is not None:
         img_tf = image.resize((224, 224))
         img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
         img_array_tf = np.expand_dims(img_array_tf, axis=0)
-        img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
 
-        # --- Model 1: Multi-Head TF ---
-        preds_v1 = v1_model.predict(img_array_tf, verbose=0)
-        v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
-        v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
-        v1_conf = np.max(preds_v1[0])
+        # --- Model 1: Multi-Head TF (if present) ---
+        if v1_model is not None:
+            preds_v1 = v1_model.predict(img_array_tf, verbose=0)
+            v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
+            v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
+            v1_conf = np.max(preds_v1[0])
+        else:
+            v1_crop, v1_disease, v1_conf = "Unknown", "Unknown", 0.0
 
         # --- Model 2: Unified TF ---
         preds_v2 = v2_model.predict(img_array_tf, verbose=0)
         v2_full_label = v2_labels[np.argmax(preds_v2[0])]
         v2_conf = np.max(preds_v2[0])
 
-        # --- Model 3: PyTorch CNN ---
-        with torch.no_grad():
-            outputs = pt_model(img_tensor_pt)
-            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-            pt_idx = torch.argmax(probabilities).item()
-            pt_conf = probabilities[pt_idx].item()
-            pt_full_label = pt_classes[str(pt_idx)]
+        # --- Model 3: PyTorch CNN (if present) ---
+        if pt_model is not None:
+            img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
+            with torch.no_grad():
+                outputs = pt_model(img_tensor_pt)
+                probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+                pt_idx = torch.argmax(probabilities).item()
+                pt_conf = probabilities[pt_idx].item()
+                pt_full_label = pt_classes[str(pt_idx)]
 
     st.subheader("🔎 Detection Results")
     st.success("The pipeline completed successfully and produced the following predictions.")
 
-    crop_name = format_crop_name(v1_crop)
     disease_name = format_disease_name(v2_full_label)
     yolo_name = format_label_name(yolo_label)
     consensus_crop, consensus_disease = resolve_consensus_labels(yolo_label, v1_crop, v2_full_label)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("YOLO Class", yolo_name, f"{yolo_conf:.0%}")
-    col2.metric("Consensus Crop", consensus_crop, f"{v1_conf:.0%}")
+    col2.metric("Consensus Crop", consensus_crop, f"{v2_conf:.0%}")
     col3.metric("Consensus Disease", consensus_disease, f"{v2_conf:.0%}")
 
     st.write(f"**Primary crop:** {consensus_crop}")
@@ -709,5 +733,4 @@ if uploaded_file is not None:
     st.caption("YOLO is being used as the master anchor for the final displayed crop and disease labels.")
 
     # Force clean garbage collection right after mathematical predictions complete
-    import gc
     gc.collect()
