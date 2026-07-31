@@ -23,9 +23,7 @@ RUN pip install --upgrade pip && \
     torch==2.2.2 torchvision==0.17.2 && \
     pip install --retries 10 --timeout 600 -r requirements.txt
 
-COPY api.py core.py class_indices.json pytoch_indices.json \
-     best_model_unified.keras \
-     yolo_crop_disease_best.pt best.pt ./
+COPY api.py core.py yolo_crop_disease_best.pt best.pt ./
 
 EXPOSE 8000
 

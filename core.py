@@ -10,12 +10,10 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import numpy as np
-import tensorflow as tf
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
 from ultralytics import YOLO
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -25,10 +23,6 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("transformers.models").setLevel(logging.CRITICAL)
 
 torch.set_num_threads(1)
-if hasattr(tf, "config") and hasattr(tf.config, "experimental"):
-    gpus = tf.config.list_physical_devices("GPU")
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
 
 
 class CNN_NeuralNet(nn.Module):
@@ -516,16 +510,20 @@ def load_all_assets():
         raise ModelLoadError("Critical Asset Missing: Put 'yolo_crop_disease_best.pt' or 'best.pt' in the project folder.")
 
     v1_path = os.path.join(base_path, "crop_disease_v4.keras")
-    v1_model = tf.keras.models.load_model(v1_path) if os.path.exists(v1_path) else None
+    v1_model = None
+    if os.path.exists(v1_path):
+        import tensorflow as tf
+        v1_model = tf.keras.models.load_model(v1_path)
 
     v2_path = os.path.join(base_path, "best_model_unified.keras")
-    if not os.path.exists(v2_path):
-        raise ModelLoadError(f"Critical Asset Missing: Put your model file at {v2_path}")
-    v2_model = tf.keras.models.load_model(v2_path)
-
-    with open(os.path.join(base_path, "class_indices.json"), "r") as f:
-        class_map = json.load(f)
-    v2_labels = [k for k, v in sorted(class_map.items(), key=lambda item: item[1])]
+    v2_model = None
+    v2_labels = []
+    if os.path.exists(v2_path):
+        import tensorflow as tf
+        v2_model = tf.keras.models.load_model(v2_path)
+        with open(os.path.join(base_path, "class_indices.json"), "r") as f:
+            class_map = json.load(f)
+        v2_labels = [k for k, v in sorted(class_map.items(), key=lambda item: item[1])]
 
     pt_path = os.path.join(base_path, "crop_disease_CNN_v3.pth")
     pt_indices_path = os.path.join(base_path, "pytoch_indices.json")
@@ -538,8 +536,13 @@ def load_all_assets():
         pt_model.load_state_dict(torch.load(pt_path, map_location=torch.device("cpu")))
         pt_model.eval()
 
-    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    clip_model, clip_processor = None, None
+    try:
+        clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    except Exception:
+        pass
+
     yolo_model = YOLO(yolo_weight_path)
     return v1_model, v2_model, v2_labels, pt_model, pt_idx_to_class, clip_model, clip_processor, yolo_model
 
@@ -586,15 +589,19 @@ V1_DISEASE_NAMES = [
 
 def predict(image: Image.Image, models):
     v1_model, v2_model, v2_labels, pt_model, pt_classes, clip_model, clip_processor, yolo_model = models
-    clip_target_classes = list(v2_labels) + ["unknown_or_other"]
-    clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes, clip_model, clip_processor)
-    if clip_label == "unknown_or_other" and clip_conf > 0.35:
-        return {
-            "valid": False,
-            "reason": "Invalid domain: image does not appear to be an agricultural crop or plant leaf.",
-            "clip_label": clip_label,
-            "clip_confidence": float(clip_conf),
-        }
+
+    clip_label, clip_conf = None, 0.0
+    if clip_model is not None and clip_processor is not None and v2_labels:
+        clip_target_classes = list(v2_labels) + ["unknown_or_other"]
+        clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes, clip_model, clip_processor)
+        if clip_label == "unknown_or_other" and clip_conf > 0.35:
+            return {
+                "valid": False,
+                "reason": "Invalid domain: image does not appear to be an agricultural crop or plant leaf.",
+                "clip_label": clip_label,
+                "clip_confidence": float(clip_conf),
+            }
+
     results = yolo_model(image)
     if not results or results[0].probs is None:
         return {
@@ -607,9 +614,11 @@ def predict(image: Image.Image, models):
     best_class_idx = first_result.probs.top1
     yolo_label = first_result.names[best_class_idx]
     yolo_conf = first_result.probs.top1conf.item()
+
     img_tf = image.resize((224, 224))
     img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
     img_array_tf = np.expand_dims(img_array_tf, axis=0)
+
     if v1_model is not None:
         preds_v1 = v1_model.predict(img_array_tf, verbose=0)
         v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
@@ -617,9 +626,14 @@ def predict(image: Image.Image, models):
         v1_conf = float(np.max(preds_v1[0]))
     else:
         v1_crop, v1_disease, v1_conf = "Unknown", "Unknown", 0.0
-    preds_v2 = v2_model.predict(img_array_tf, verbose=0)
-    v2_full_label = v2_labels[np.argmax(preds_v2[0])]
-    v2_conf = float(np.max(preds_v2[0]))
+
+    if v2_model is not None:
+        preds_v2 = v2_model.predict(img_array_tf, verbose=0)
+        v2_full_label = v2_labels[np.argmax(preds_v2[0])]
+        v2_conf = float(np.max(preds_v2[0]))
+    else:
+        v2_full_label, v2_conf = "Unknown", 0.0
+
     if pt_model is not None:
         img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
         with torch.no_grad():
@@ -630,6 +644,7 @@ def predict(image: Image.Image, models):
             pt_full_label = pt_classes[str(pt_idx)]
     else:
         pt_full_label, pt_conf = "Unknown", 0.0
+
     consensus_crop, consensus_disease = resolve_consensus_labels(yolo_label, v1_crop, v2_full_label)
     gc.collect()
     return {
