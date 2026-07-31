@@ -24,7 +24,7 @@ RUN pip install --upgrade pip && \
     pip install --retries 10 --timeout 600 -r requirements.txt
 
 COPY api.py core.py class_indices.json pytoch_indices.json \
-     best_model_unified.keras crop_disease_CNN_v3.pth \
+     best_model_unified.keras \
      yolo_crop_disease_best.pt best.pt ./
 
 EXPOSE 8000
