@@ -603,17 +603,20 @@ def predict(image: Image.Image, models):
             }
 
     results = yolo_model(image)
-    if not results or results[0].probs is None:
+    if not results or len(results[0].boxes) == 0:
         return {
             "valid": False,
-            "reason": "Low quality input: plant tissue recognized but cannot isolate distinct features.",
+            "reason": "Low quality input: plant tissue recognized, but cannot isolate distinct structural features.",
             "clip_label": clip_label,
             "clip_confidence": float(clip_conf),
         }
     first_result = results[0]
-    best_class_idx = first_result.probs.top1
+    boxes = first_result.boxes
+    best_box_idx = torch.argmax(boxes.conf).item()
+    best_class_idx = int(boxes.cls[best_box_idx].item())
+
     yolo_label = first_result.names[best_class_idx]
-    yolo_conf = first_result.probs.top1conf.item()
+    yolo_conf = float(boxes.conf[best_box_idx].item())
 
     img_tf = image.resize((224, 224))
     img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
