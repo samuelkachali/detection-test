@@ -508,21 +508,36 @@ class ModelLoadError(Exception):
 
 def load_all_assets():
     base_path = os.path.dirname(__file__) if "__file__" in locals() else os.getcwd()
-    yolo_weight_path = os.path.join(base_path, "best.pt")
-    if not os.path.exists(yolo_weight_path):
-        raise ModelLoadError(f"Critical Asset Missing: Put your weights file at {yolo_weight_path}")
 
-    v1_model = tf.keras.models.load_model("crop_disease_v4.keras")
-    v2_model = tf.keras.models.load_model("crop_disease_unified_v2.keras")
-    with open("class_indices.json", "r") as f:
+    yolo_weight_path = os.path.join(base_path, "yolo_crop_disease_best.pt")
+    if not os.path.exists(yolo_weight_path):
+        yolo_weight_path = os.path.join(base_path, "best.pt")
+    if not os.path.exists(yolo_weight_path):
+        raise ModelLoadError("Critical Asset Missing: Put 'yolo_crop_disease_best.pt' or 'best.pt' in the project folder.")
+
+    v1_path = os.path.join(base_path, "crop_disease_v4.keras")
+    v1_model = tf.keras.models.load_model(v1_path) if os.path.exists(v1_path) else None
+
+    v2_path = os.path.join(base_path, "best_model_unified.keras")
+    if not os.path.exists(v2_path):
+        raise ModelLoadError(f"Critical Asset Missing: Put your model file at {v2_path}")
+    v2_model = tf.keras.models.load_model(v2_path)
+
+    with open(os.path.join(base_path, "class_indices.json"), "r") as f:
         class_map = json.load(f)
     v2_labels = [k for k, v in sorted(class_map.items(), key=lambda item: item[1])]
-    with open("pytoch_indices.json", "r") as f:
-        pt_idx_to_class = json.load(f)
-    num_classes = len(pt_idx_to_class)
-    pt_model = CNN_NeuralNet(3, num_classes)
-    pt_model.load_state_dict(torch.load("crop_disease_CNN_v3.pth", map_location=torch.device("cpu")))
-    pt_model.eval()
+
+    pt_path = os.path.join(base_path, "crop_disease_CNN_v3.pth")
+    pt_indices_path = os.path.join(base_path, "pytoch_indices.json")
+    pt_model, pt_idx_to_class = None, {}
+    if os.path.exists(pt_path) and os.path.exists(pt_indices_path):
+        with open(pt_indices_path, "r") as f:
+            pt_idx_to_class = json.load(f)
+        num_classes = len(pt_idx_to_class)
+        pt_model = CNN_NeuralNet(3, num_classes)
+        pt_model.load_state_dict(torch.load(pt_path, map_location=torch.device("cpu")))
+        pt_model.eval()
+
     clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     yolo_model = YOLO(yolo_weight_path)
@@ -595,20 +610,26 @@ def predict(image: Image.Image, models):
     img_tf = image.resize((224, 224))
     img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
     img_array_tf = np.expand_dims(img_array_tf, axis=0)
-    img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
-    preds_v1 = v1_model.predict(img_array_tf, verbose=0)
-    v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
-    v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
-    v1_conf = float(np.max(preds_v1[0]))
+    if v1_model is not None:
+        preds_v1 = v1_model.predict(img_array_tf, verbose=0)
+        v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
+        v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
+        v1_conf = float(np.max(preds_v1[0]))
+    else:
+        v1_crop, v1_disease, v1_conf = "Unknown", "Unknown", 0.0
     preds_v2 = v2_model.predict(img_array_tf, verbose=0)
     v2_full_label = v2_labels[np.argmax(preds_v2[0])]
     v2_conf = float(np.max(preds_v2[0]))
-    with torch.no_grad():
-        outputs = pt_model(img_tensor_pt)
-        probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-        pt_idx = torch.argmax(probabilities).item()
-        pt_conf = probabilities[pt_idx].item()
-        pt_full_label = pt_classes[str(pt_idx)]
+    if pt_model is not None:
+        img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
+        with torch.no_grad():
+            outputs = pt_model(img_tensor_pt)
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+            pt_idx = torch.argmax(probabilities).item()
+            pt_conf = probabilities[pt_idx].item()
+            pt_full_label = pt_classes[str(pt_idx)]
+    else:
+        pt_full_label, pt_conf = "Unknown", 0.0
     consensus_crop, consensus_disease = resolve_consensus_labels(yolo_label, v1_crop, v2_full_label)
     gc.collect()
     return {
