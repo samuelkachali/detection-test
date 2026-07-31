@@ -490,7 +490,12 @@ def resolve_consensus_labels(yolo_label, fallback_crop, fallback_disease):
             resolved_crop = crop_name
             break
     resolved_disease = format_disease_name(fallback_disease)
-    yolo_disease = format_disease_name(yolo_label)
+    yolo_disease_raw = str(yolo_label or "").strip()
+    for alias, _ in crop_aliases:
+        if yolo_disease_raw.lower().startswith(alias + "_"):
+            yolo_disease_raw = yolo_disease_raw[len(alias) + 1:]
+            break
+    yolo_disease = format_disease_name(yolo_disease_raw)
     if yolo_disease and yolo_disease != "Unknown":
         resolved_disease = yolo_disease
     return resolved_crop, resolved_disease
