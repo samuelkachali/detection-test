@@ -461,6 +461,16 @@ def format_label_name(raw_name):
     return cleaned.title()
 
 
+def clean_yolo_label(raw_name):
+    if not raw_name:
+        return raw_name
+    label = str(raw_name).strip()
+    for alias in ["maize", "corn", "soyabean", "soybean", "soya", "bean", "beans", "tomato", "potato", "grape", "apple", "orange", "peach", "cherry", "strawberry", "blueberry", "pepper", "squash", "raspberry"]:
+        if label.startswith(alias + "_"):
+            return label[len(alias) + 1:]
+    return label
+
+
 def resolve_consensus_labels(yolo_label, fallback_crop, fallback_disease):
     label = str(yolo_label or "").strip().lower()
     crop_aliases = [
@@ -490,12 +500,7 @@ def resolve_consensus_labels(yolo_label, fallback_crop, fallback_disease):
             resolved_crop = crop_name
             break
     resolved_disease = format_disease_name(fallback_disease)
-    yolo_disease_raw = str(yolo_label or "").strip()
-    for alias, _ in crop_aliases:
-        if yolo_disease_raw.lower().startswith(alias + "_"):
-            yolo_disease_raw = yolo_disease_raw[len(alias) + 1:]
-            break
-    yolo_disease = format_disease_name(yolo_disease_raw)
+    yolo_disease = format_disease_name(clean_yolo_label(yolo_label))
     if yolo_disease and yolo_disease != "Unknown":
         resolved_disease = yolo_disease
     return resolved_crop, resolved_disease
@@ -620,7 +625,7 @@ def predict(image: Image.Image, models):
     best_box_idx = torch.argmax(boxes.conf).item()
     best_class_idx = int(boxes.cls[best_box_idx].item())
 
-    yolo_label = first_result.names[best_class_idx]
+    yolo_label = clean_yolo_label(first_result.names[best_class_idx])
     yolo_conf = float(boxes.conf[best_box_idx].item())
 
     img_tf = image.resize((224, 224))
