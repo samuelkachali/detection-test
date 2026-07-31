@@ -619,6 +619,7 @@ def predict(image: Image.Image, models):
     yolo_conf = float(boxes.conf[best_box_idx].item())
 
     img_tf = image.resize((224, 224))
+    import tensorflow as tf
     img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
     img_array_tf = np.expand_dims(img_array_tf, axis=0)
 
