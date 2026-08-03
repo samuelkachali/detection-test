@@ -518,6 +518,7 @@ def load_all_assets():
         yolo_weight_path = os.path.join(base_path, "best.pt")
     if not os.path.exists(yolo_weight_path):
         raise ModelLoadError("Critical Asset Missing: Put 'yolo_crop_disease_best.pt' or 'best.pt' in the project folder.")
+    print(f"[MODEL LOAD] Using YOLO weights: {yolo_weight_path}")
 
     v1_path = os.path.join(base_path, "crop_disease_v4.keras")
     v1_model = None
