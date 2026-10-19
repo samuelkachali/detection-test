@@ -1,22 +1,96 @@
 import os
 import gc
 import warnings
+import json
+import logging
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
+import numpy as np
 import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
 from PIL import Image
 from ultralytics import YOLO
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*__path__.*")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers.models").setLevel(logging.CRITICAL)
 
 torch.set_num_threads(1)
 
-YOLO_CONFIDENCE_THRESHOLD = 0.50
+
+class CNN_NeuralNet(nn.Module):
+    def __init__(self, in_channels, num_classes):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2)
+        )
+        self.res1 = nn.Sequential(
+            nn.Sequential(
+                nn.Conv2d(128, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(128, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True)
+            )
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2)
+        )
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2)
+        )
+        self.res2 = nn.Sequential(
+            nn.Sequential(
+                nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                nn.BatchNorm2d(512),
+                nn.ReLU(inplace=True)
+            ),
+            nn.Sequential(
+                nn.Conv2d(512, 512, kernel_size=3, padding=1),
+                nn.BatchNorm2d(512),
+                nn.ReLU(inplace=True)
+            )
+        )
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, xb):
+        out = self.conv1(xb)
+        out = self.conv2(out)
+        out = self.res1(out) + out
+        out = self.conv3(out)
+        out = self.conv4(out)
+        out = self.res2(out) + out
+        out = self.classifier(out)
+        return out
+
 
 CLIP_ENSEMBLE_MAP = {
     'Tomato___Late_blight': [
@@ -397,21 +471,6 @@ def clean_yolo_label(raw_name):
     return label
 
 
-def is_supported_crop_label(raw_name):
-    label = str(raw_name or "").strip().lower()
-    crop_aliases = (
-        "maize", "corn", "soyabean", "soybean", "soya", "bean", "beans",
-        "tomato", "potato", "grape", "apple", "orange", "peach", "cherry",
-        "strawberry", "blueberry", "pepper", "squash", "raspberry",
-    )
-    return any(
-        label.startswith(alias) and
-        len(label) > len(alias) and
-        label[len(alias)] in ("_", "-", " ")
-        for alias in crop_aliases
-    )
-
-
 def resolve_consensus_labels(yolo_label, fallback_crop, fallback_disease):
     label = str(yolo_label or "").strip().lower()
     crop_aliases = [
@@ -461,49 +520,161 @@ def load_all_assets():
         raise ModelLoadError("Critical Asset Missing: Put 'yolo_crop_disease_best.pt' or 'best.pt' in the project folder.")
     print(f"[MODEL LOAD] Using YOLO weights: {yolo_weight_path}")
 
-    return YOLO(yolo_weight_path)
+    v1_path = os.path.join(base_path, "crop_disease_v4.keras")
+    v1_model = None
+    if os.path.exists(v1_path):
+        import tensorflow as tf
+        v1_model = tf.keras.models.load_model(v1_path)
+
+    v2_path = os.path.join(base_path, "best_model_unified.keras")
+    v2_model = None
+    v2_labels = []
+    if os.path.exists(v2_path):
+        import tensorflow as tf
+        v2_model = tf.keras.models.load_model(v2_path)
+        with open(os.path.join(base_path, "class_indices.json"), "r") as f:
+            class_map = json.load(f)
+        v2_labels = [k for k, v in sorted(class_map.items(), key=lambda item: item[1])]
+
+    pt_path = os.path.join(base_path, "crop_disease_CNN_v3.pth")
+    pt_indices_path = os.path.join(base_path, "pytoch_indices.json")
+    pt_model, pt_idx_to_class = None, {}
+    if os.path.exists(pt_path) and os.path.exists(pt_indices_path):
+        with open(pt_indices_path, "r") as f:
+            pt_idx_to_class = json.load(f)
+        num_classes = len(pt_idx_to_class)
+        pt_model = CNN_NeuralNet(3, num_classes)
+        pt_model.load_state_dict(torch.load(pt_path, map_location=torch.device("cpu")))
+        pt_model.eval()
+
+    clip_model, clip_processor = None, None
+    try:
+        clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    except Exception:
+        pass
+
+    yolo_model = YOLO(yolo_weight_path)
+    return v1_model, v2_model, v2_labels, pt_model, pt_idx_to_class, clip_model, clip_processor, yolo_model
 
 
-def predict(image: Image.Image, yolo_model):
-    results = yolo_model(image, conf=YOLO_CONFIDENCE_THRESHOLD)
+def run_clip_ensemble_inference(image, target_class_list, clip_model, clip_processor):
+    flat_prompts = []
+    prompt_to_class_idx = []
+    for idx, class_name in enumerate(target_class_list):
+        sentences = CLIP_ENSEMBLE_MAP.get(class_name, [f"a photo of a leaf with {class_name}"])
+        for sentence in sentences:
+            flat_prompts.append(sentence)
+            prompt_to_class_idx.append(idx)
+    inputs = clip_processor(text=flat_prompts, images=image, return_tensors="pt", padding=True)
+    with torch.no_grad():
+        outputs = clip_model(**inputs)
+        logits_per_image = outputs.logits_per_image
+        flat_probabilities = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
+    class_accumulated_scores = np.zeros(len(target_class_list))
+    class_sentence_counts = np.zeros(len(target_class_list))
+    for prob, class_idx in zip(flat_probabilities, prompt_to_class_idx):
+        class_accumulated_scores[class_idx] += prob
+        class_sentence_counts[class_idx] += 1
+    final_class_probabilities = class_accumulated_scores / np.maximum(class_sentence_counts, 1)
+    final_class_probabilities = final_class_probabilities / np.sum(final_class_probabilities)
+    best_idx = np.argmax(final_class_probabilities)
+    return target_class_list[best_idx], final_class_probabilities[best_idx]
+
+
+pytorch_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+V1_CROP_NAMES = ["bean", "maize", "soya"]
+V1_DISEASE_NAMES = [
+    "Maize Gray Leaf Spot", "Soybeans Healthy", "Soybeans Bacterial Pustule",
+    "Soybeans Frog Eye Leaf Spot", "Maize Blight", "Soybeans Sudden Death Syndrome",
+    "Beans Angular Leaf Spot", "Soybeans Rust", "Beans Rust",
+    "Soybeans Target Leaf Spot", "Maize Common Rust", "Maize Healthy",
+    "Beans Healthy", "Soybeans Yellow Mosaic"
+]
+
+
+def predict(image: Image.Image, models):
+    v1_model, v2_model, v2_labels, pt_model, pt_classes, clip_model, clip_processor, yolo_model = models
+
+    clip_label, clip_conf = None, 0.0
+    if clip_model is not None and clip_processor is not None and v2_labels:
+        clip_target_classes = list(v2_labels) + ["unknown_or_other"]
+        clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes, clip_model, clip_processor)
+        if clip_label == "unknown_or_other" and clip_conf > 0.35:
+            return {
+                "valid": False,
+                "reason": "Invalid domain: image does not appear to be an agricultural crop or plant leaf.",
+                "clip_label": clip_label,
+                "clip_confidence": float(clip_conf),
+            }
+
+    results = yolo_model(image)
     if not results or len(results[0].boxes) == 0:
         return {
             "valid": False,
-            "reason": "No clear crop disease features were detected. Try a close, well-lit photo of one leaf.",
+            "reason": "Low quality input: plant tissue recognized, but cannot isolate distinct structural features.",
+            "clip_label": clip_label,
+            "clip_confidence": float(clip_conf),
         }
     first_result = results[0]
     boxes = first_result.boxes
     best_box_idx = torch.argmax(boxes.conf).item()
     best_class_idx = int(boxes.cls[best_box_idx].item())
 
-    raw_yolo_label = first_result.names[best_class_idx]
+    yolo_label = clean_yolo_label(first_result.names[best_class_idx])
     yolo_conf = float(boxes.conf[best_box_idx].item())
-    if not is_supported_crop_label(raw_yolo_label):
-        return {
-            "valid": False,
-            "reason": "The detected object is not a supported crop. Try a close-up photo of a supported crop leaf.",
-            "yolo_label": str(raw_yolo_label),
-            "yolo_confidence": yolo_conf,
-        }
 
-    yolo_label = clean_yolo_label(raw_yolo_label)
-    consensus_crop, consensus_disease = resolve_consensus_labels(raw_yolo_label, "Unknown", "Unknown")
+    img_tf = image.resize((224, 224))
+    import tensorflow as tf
+    img_array_tf = tf.keras.utils.img_to_array(img_tf) / 255.0
+    img_array_tf = np.expand_dims(img_array_tf, axis=0)
+
+    if v1_model is not None:
+        preds_v1 = v1_model.predict(img_array_tf, verbose=0)
+        v1_crop = V1_CROP_NAMES[np.argmax(preds_v1[0])]
+        v1_disease = V1_DISEASE_NAMES[np.argmax(preds_v1[1])]
+        v1_conf = float(np.max(preds_v1[0]))
+    else:
+        v1_crop, v1_disease, v1_conf = "Unknown", "Unknown", 0.0
+
+    if v2_model is not None:
+        preds_v2 = v2_model.predict(img_array_tf, verbose=0)
+        v2_full_label = v2_labels[np.argmax(preds_v2[0])]
+        v2_conf = float(np.max(preds_v2[0]))
+    else:
+        v2_full_label, v2_conf = "Unknown", 0.0
+
+    if pt_model is not None:
+        img_tensor_pt = pytorch_transforms(image).unsqueeze(0)
+        with torch.no_grad():
+            outputs = pt_model(img_tensor_pt)
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+            pt_idx = torch.argmax(probabilities).item()
+            pt_conf = probabilities[pt_idx].item()
+            pt_full_label = pt_classes[str(pt_idx)]
+    else:
+        pt_full_label, pt_conf = "Unknown", 0.0
+
+    consensus_crop, consensus_disease = resolve_consensus_labels(yolo_label, v1_crop, v2_full_label)
     gc.collect()
     return {
         "valid": True,
-        "domain_label": "crop_leaf",
-        "domain_confidence": yolo_conf,
-        "clip_label": None,
-        "clip_confidence": 0.0,
+        "clip_label": clip_label,
+        "clip_confidence": float(clip_conf),
         "yolo_label": yolo_label,
         "yolo_confidence": float(yolo_conf),
-        "v1_crop": "Unknown",
-        "v1_disease": "Unknown",
-        "v1_confidence": 0.0,
-        "v2_full_label": "Unknown",
-        "v2_confidence": 0.0,
-        "pt_full_label": "Unknown",
-        "pt_confidence": 0.0,
+        "v1_crop": v1_crop,
+        "v1_disease": v1_disease,
+        "v1_confidence": v1_conf,
+        "v2_full_label": v2_full_label,
+        "v2_confidence": v2_conf,
+        "pt_full_label": pt_full_label,
+        "pt_confidence": float(pt_conf),
         "consensus_crop": consensus_crop,
         "consensus_disease": consensus_disease,
     }
