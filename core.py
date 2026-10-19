@@ -3,6 +3,7 @@ import gc
 import warnings
 import json
 import logging
+import math
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -15,6 +16,7 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 from PIL import Image
 from ultralytics import YOLO
+from transformers import CLIPModel, CLIPProcessor
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -363,6 +365,28 @@ CLIP_ENSEMBLE_MAP = {
     ]
 }
 
+CROP_LEAF_PROMPTS = [
+    "a close-up photograph of a crop leaf, showing its veins and surface",
+    "a close-up photograph of a diseased maize leaf in a farm",
+    "a close-up photograph of a healthy green bean plant leaf",
+    "a close-up photograph of a soybean leaf with visible disease spots",
+    "a close-up photograph of a tomato plant leaf",
+    "a close-up photograph of a crop plant with leaves filling the image",
+]
+
+NON_CROP_PROMPTS = [
+    "a photograph of a computer screen displaying code",
+    "a photograph of a laptop or desktop computer",
+    "a photograph of an everyday household object",
+    "a photograph of a person or animal",
+    "a photograph of a building or indoor room",
+    "a photograph of a landscape with no close-up plant leaves",
+    "a photograph of a document, sign, or text",
+    "a screenshot or picture of a user interface",
+]
+
+DOMAIN_CONFIDENCE_THRESHOLD = 0.60
+
 DISPLAY_NAME_MAP = {
     'Tomato___Late_blight': 'Tomato - Late Blight',
     'Tomato___healthy': 'Tomato - Healthy',
@@ -551,11 +575,23 @@ def load_all_assets():
     try:
         clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.warning("CLIP image screening is unavailable: %s", exc)
 
     yolo_model = YOLO(yolo_weight_path)
     return v1_model, v2_model, v2_labels, pt_model, pt_idx_to_class, clip_model, clip_processor, yolo_model
+
+
+def validate_crop_leaf_image(image, clip_model, clip_processor):
+    prompts = CROP_LEAF_PROMPTS + NON_CROP_PROMPTS
+    inputs = clip_processor(text=prompts, images=image, return_tensors="pt", padding=True)
+    with torch.no_grad():
+        logits = clip_model(**inputs).logits_per_image[0]
+
+    crop_score = torch.logsumexp(logits[:len(CROP_LEAF_PROMPTS)], dim=0) - math.log(len(CROP_LEAF_PROMPTS))
+    non_crop_score = torch.logsumexp(logits[len(CROP_LEAF_PROMPTS):], dim=0) - math.log(len(NON_CROP_PROMPTS))
+    confidence = torch.sigmoid(crop_score - non_crop_score).item()
+    return confidence >= DOMAIN_CONFIDENCE_THRESHOLD, confidence
 
 
 def run_clip_ensemble_inference(image, target_class_list, clip_model, clip_processor):
@@ -602,6 +638,23 @@ def predict(image: Image.Image, models):
     v1_model, v2_model, v2_labels, pt_model, pt_classes, clip_model, clip_processor, yolo_model = models
 
     clip_label, clip_conf = None, 0.0
+    if clip_model is None or clip_processor is None:
+        return {
+            "valid": False,
+            "reason": "Image screening is unavailable, so a crop disease prediction cannot be made right now.",
+            "domain_label": "unknown_or_other",
+            "domain_confidence": 0.0,
+        }
+
+    is_crop_leaf, domain_conf = validate_crop_leaf_image(image, clip_model, clip_processor)
+    if not is_crop_leaf:
+        return {
+            "valid": False,
+            "reason": "This does not look like a close-up of a crop leaf. Please try a clear, well-lit photo of one leaf.",
+            "domain_label": "unknown_or_other",
+            "domain_confidence": float(domain_conf),
+        }
+
     if clip_model is not None and clip_processor is not None and v2_labels:
         clip_target_classes = list(v2_labels) + ["unknown_or_other"]
         clip_label, clip_conf = run_clip_ensemble_inference(image, clip_target_classes, clip_model, clip_processor)
@@ -664,6 +717,8 @@ def predict(image: Image.Image, models):
     gc.collect()
     return {
         "valid": True,
+        "domain_label": "crop_leaf",
+        "domain_confidence": float(domain_conf),
         "clip_label": clip_label,
         "clip_confidence": float(clip_conf),
         "yolo_label": yolo_label,
